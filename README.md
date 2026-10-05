@@ -3,7 +3,7 @@
 **Your tablet becomes the GPS and dashboard of your truck in American Truck Simulator.**
 Free and open source.
 
-Website: https://maxvel-coder.github.io/ats-co-driver/ · Download: [latest release](https://github.com/maxvel-coder/ats-co-driver/releases/latest)
+Website: https://maxvel-coder.github.io/ats-co-driver/ · Download: [latest release](https://github.com/maxvel-coder/ats-co-driver/releases/latest) · Support: [Buy me a coffee](https://buymeacoffee.com/maxvelx)
 
 ## What it does
 
