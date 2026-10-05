@@ -69,8 +69,8 @@ const CTL = {
   engineelect: { icon: 'battery', label: 'Electrics', on: ch => ch['truck.electric.enabled'], color: 'amber' },
   light: { icon: 'lowbeam', label: 'Lights', on: ch => ch['truck.light.beam.low'] },
   hblight: { icon: 'highbeam', label: 'High beam', on: ch => ch['truck.light.beam.high'], color: 'blue' },
-  lblinker: { icon: 'left', label: 'Left', on: ch => ch['truck.lblinker'] || ch['truck.hazard.warning'], blink: true },
-  rblinker: { icon: 'right', label: 'Right', on: ch => ch['truck.rblinker'] || ch['truck.hazard.warning'], blink: true },
+  lblinker: { icon: 'left', label: 'Left', on: ch => ch['truck.lblinker'] && !ch['truck.hazard.warning'], blink: true },   // hazards win: only the hazard light blinks
+  rblinker: { icon: 'right', label: 'Right', on: ch => ch['truck.rblinker'] && !ch['truck.hazard.warning'], blink: true },
   flasher4way: { icon: 'hazard', label: 'Hazards', on: ch => ch['truck.hazard.warning'], color: 'red', blink: true },
   wipers: { icon: 'wipers', label: 'Wipers', on: ch => ch['truck.wipers'] },
   parkingbrake: { icon: 'park', label: 'Park brake', on: ch => ch['truck.brake.parking'], color: 'red' },
@@ -97,7 +97,7 @@ const CTL = {
 
 // Warning lights for the telltale widget, in dashboard order (left indicator first, right last).
 const TELLTALES = [
-  { id: 'left', name: 'Left indicator', icon: 'left', color: 'green', blink: true, on: ch => ch['truck.lblinker'] || ch['truck.hazard.warning'] },
+  { id: 'left', name: 'Left indicator', icon: 'left', color: 'green', blink: true, on: ch => ch['truck.lblinker'] && !ch['truck.hazard.warning'] },
   { id: 'lowbeam', name: 'Low beam', icon: 'lowbeam', color: 'green', on: ch => ch['truck.light.beam.low'] },
   { id: 'highbeam', name: 'High beam', icon: 'highbeam', color: 'blue', on: ch => ch['truck.light.beam.high'] },
   { id: 'hazard', name: 'Hazards', icon: 'hazard', color: 'red', blink: true, on: ch => ch['truck.hazard.warning'] },
@@ -108,7 +108,7 @@ const TELLTALES = [
   { id: 'fuel', name: 'Low fuel', icon: 'fuel', color: 'amber', on: ch => ch['truck.fuel.warning'] },
   { id: 'damage', name: 'Damage (needs repair)', icon: 'wrench', color: 'amber', on: (ch, s) => (s?.damage?.max ?? 0) >= (settings?.damage?.thresholdPct ?? 10) },
   { id: 'engine', name: 'Engine off', icon: 'power', color: 'red', on: ch => ch['truck.electric.enabled'] && !ch['truck.engine.enabled'] },
-  { id: 'right', name: 'Right indicator', icon: 'right', color: 'green', blink: true, on: ch => ch['truck.rblinker'] || ch['truck.hazard.warning'] },
+  { id: 'right', name: 'Right indicator', icon: 'right', color: 'green', blink: true, on: ch => ch['truck.rblinker'] && !ch['truck.hazard.warning'] },
 ];
 
 // ------------------------------------------------------------------ widget catalogue

@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findSteamAppSync } from 'steam-locate';
 
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 const PORT = Number(process.env.CODRIVER_PORT) || 8080;
 const ATS_APP_ID = '270880';
 // installed layout:  <install>\node\node.exe  +  <install>\app\{launcher,server}.mjs, tools\, native\, web\, maplibre\, plugin\, piper\
@@ -89,6 +89,43 @@ function documentsDir(): string {
     if (m) return m[1].trim().replace(/%([^%]+)%/g, (_x, v: string) => process.env[v] ?? '');
   } catch { /* fall back */ }
   return path.join(os.homedir(), 'Documents');
+}
+
+// The game feeds the plugin's buttons into a control only if that control's binding in the profile
+// lists "semantical.<name>". Rebinding a control in the game's options (or a wheel / gamepad preset)
+// rewrites the line without it, and then that dashboard button does nothing. Put it back for the
+// controls the plugin uses, in every profile, while the game is closed (it rewrites the file on exit).
+const PLUGIN_MIXES = ['engine', 'engineelect', 'ignitionon', 'ignitionoff', 'ignitionstrt', 'light', 'lighton', 'lightoff', 'lightpark', 'hblight',
+  'lblinker', 'rblinker', 'flasher4way', 'wipers', 'wipersback', 'wipers0', 'wipers1', 'wipers2', 'wipers3', 'wipers4',
+  'cruiectrl', 'cruiectrlinc', 'cruiectrldec', 'cruiectrlres', 'parkingbrake', 'handbrake', 'horn', 'airhorn', 'beacon', 'cabinlight',
+  'parking_cams', 'infotainment', 'navmap', 'cam1', 'cam2', 'cam3', 'cam4', 'cam5', 'cam6', 'camcycle', 'radiotoggle', 'radionext',
+  'radioprev', 'screenshot', 'lwinopen', 'lwinclose', 'rwinopen', 'rwinclose', 'quickpark', 'showmirrors', 'activate', 'radioup', 'radiodown'];
+const gameRunning = () => { try { return /amtrucks\.exe/i.test(execFileSync('tasklist', ['/FI', 'IMAGENAME eq amtrucks.exe', '/NH'], { encoding: 'utf8' })); } catch { return false; } };
+function enableButtonsInProfiles(gameDocs: string): { fixed: number; profiles: number; skipped: string } {
+  const files: string[] = [];
+  for (const dir of ['profiles', 'steam_profiles']) {
+    try { for (const p of fs.readdirSync(path.join(gameDocs, dir))) { const f = path.join(gameDocs, dir, p, 'controls.sii'); if (fs.existsSync(f)) files.push(f); } } catch { /* no such folder */ }
+  }
+  if (!files.length) return { fixed: 0, profiles: 0, skipped: '' };
+  if (gameRunning()) return { fixed: 0, profiles: files.length, skipped: 'game running' };
+  let fixed = 0, profiles = 0;
+  for (const f of files) {
+    const text = fs.readFileSync(f, 'utf8');
+    if (!text.startsWith('SiiNunit')) continue;   // not a plain-text file (another save format): leave it alone
+    let n = 0;
+    const out = text.replace(/("mix ([\w.]+) `)([^`]*)(`")/g, (m, head, name, expr, tail) => {
+      if (!PLUGIN_MIXES.includes(name) || expr.includes(`semantical.${name}?`)) return m;
+      n++;
+      return `${head}${expr.trim() ? `${expr} | ` : ''}semantical.${name}?0${tail}`;
+    });
+    if (!n) continue;
+    const bak = f + '.codriver-backup';
+    if (!fs.existsSync(bak)) fs.copyFileSync(f, bak);   // the player's original, kept once
+    fs.writeFileSync(f, out);
+    fixed += n; profiles++;
+    log(`controls: enabled ${n} dashboard buttons in ${f}`);
+  }
+  return { fixed, profiles, skipped: '' };
 }
 
 // ------------------------------------------------------------------ steps
@@ -338,7 +375,16 @@ async function main() {
   set('game', 'ok', gameDir);
   const gameDocs = path.join(documentsDir(), 'American Truck Simulator');
 
-  if (process.env.CODRIVER_NO_PLUGIN) set('plugin', 'skip', 'Skipped (test run)'); else installPlugin(gameDir);
+  if (process.env.CODRIVER_NO_PLUGIN) set('plugin', 'skip', 'Skipped (test run)');
+  else {
+    installPlugin(gameDir);
+    try {
+      const c = enableButtonsInProfiles(gameDocs);
+      const s = step('plugin');
+      if (c.skipped) s.detail += '. Close the game and start Co-Driver again once, so all dashboard buttons work';
+      else if (c.fixed) s.detail += `. Dashboard buttons enabled for ${c.fixed} controls (${c.profiles} profile${c.profiles > 1 ? 's' : ''})`;
+    } catch (e) { log('controls check failed:', e); }
+  }
   // a failed map step waits on the page for "Try again" (it resumes from the failed step)
   for (;;) {
     try { await buildMap(gameDir); break; }
