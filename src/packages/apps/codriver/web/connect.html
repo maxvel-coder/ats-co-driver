@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATS Co-Driver: connect your phone or tablet</title>
+<link rel="icon" href="icon.svg">
+<style>
+  :root { --bg: #06080b; --card: #0f141b; --line: #ffffff1a; --fg: #eef3f8; --dim: #8593a5; --acc: #3fa9ff; --ok: #34c759; --warn: #ffb020; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: radial-gradient(1200px 600px at 70% -10%, #12324d 0%, var(--bg) 60%); color: var(--fg);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; display: grid; place-items: center; padding: 24px; }
+  main { width: min(980px, 100%); display: grid; grid-template-columns: 360px 1fr; gap: 32px; align-items: center; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  .qr { background: #fff; border-radius: 24px; padding: 18px; box-shadow: 0 30px 80px #0009; }
+  .qr img { width: 100%; display: block; image-rendering: pixelated; }
+  h1 { margin: 0 0 6px; font-size: 34px; letter-spacing: -.5px; }
+  h1 span { color: var(--acc); }
+  .lead { color: var(--dim); margin: 0 0 22px; }
+  ol { margin: 0 0 22px; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 12px; }
+  ol li { counter-increment: s; display: flex; gap: 12px; align-items: flex-start; }
+  ol li::before { content: counter(s); flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
+    background: var(--acc); color: #fff; font-weight: 700; }
+  .url { display: inline-block; font: 600 20px ui-monospace, Consolas, monospace; background: var(--card); border: 1px solid var(--line);
+    padding: 8px 14px; border-radius: 12px; user-select: all; }
+  .others { color: var(--dim); font-size: 13px; margin-top: 6px; }
+  .status { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 22px; font-size: 14px; }
+  .pill { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; background: var(--card); border: 1px solid var(--line); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .foot { margin-top: 26px; color: var(--dim); font-size: 13px; }
+  a { color: var(--acc); }
+  .nocam { margin: 4px 0 6px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); }
+  .nocam summary { cursor: pointer; font-weight: 600; }
+  .nocam ol.small { margin: 12px 0 8px; gap: 8px; font-size: 15px; }
+  .nocam ol.small li::before { width: 24px; height: 24px; font-size: 13px; background: #2a3a4d; }
+  .url.sm { font-size: 16px; padding: 3px 10px; }
+  .trouble { margin: 6px 0 0; color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="qr"><img id="qr" src="api/qr.svg" alt="QR code with the address of ATS Co-Driver"></div>
+  <div>
+    <h1>ATS <span>Co-Driver</span> is running</h1>
+    <p class="lead">Your tablet or phone becomes the GPS and dashboard of your truck.</p>
+    <ol>
+      <li><div>Connect your phone or tablet to the <b>same Wi-Fi</b> as this PC.</div></li>
+      <li><div>Scan the code with the camera, or open<br><span class="url" id="url">…</span><div class="others" id="others"></div></div></li>
+      <li><div>In the browser menu choose <b>“Add to Home screen”</b>, Co-Driver then opens full screen like an app.</div></li>
+    </ol>
+    <details class="nocam" open>
+      <summary>No camera on your tablet? Type the address instead</summary>
+      <ol class="small">
+        <li><div>On the tablet open <b>Chrome</b> (or any browser) and tap the <b>address bar</b> at the top.</div></li>
+        <li><div>Type exactly <span class="url sm" id="url2">…</span>, with <b>http://</b> at the start and the <b id="portTxt">:8080</b> at the end, and press Go/Enter.</div></li>
+        <li><div>Then menu <b>⋮ → “Add to Home screen”</b>, so next time it's one tap.</div></li>
+      </ol>
+      <p class="trouble"><b>Doesn't load?</b> Check that the tablet is on the same Wi-Fi as this PC (not mobile data or a guest network).
+        If Windows asked about the firewall, choose <b>Allow</b> for private networks. Still nothing? Try the other address listed above.</p>
+    </details>
+    <div class="status">
+      <span class="pill"><span class="dot ok"></span> Co-Driver server</span>
+      <span class="pill"><span class="dot" id="gameDot"></span> <span id="gameTxt">Waiting for the game…</span></span>
+    </div>
+    <p class="foot">Keep the Co-Driver window open while you play. You can also <a href="./">open the dashboard on this PC</a>.</p>
+  </div>
+</main>
+<script>
+  async function refresh() {
+    try {
+      const r = await (await fetch('api/connect', { cache: 'no-store' })).json();
+      const [first, ...rest] = r.urls.length ? r.urls : [location.origin];
+      document.getElementById('url').textContent = first;
+      document.getElementById('url2').textContent = first;
+      document.getElementById('portTxt').textContent = ':' + (first.match(/:(\d+)\/?$/)?.[1] ?? '8080');
+      document.getElementById('qr').src = 'api/qr.svg?u=' + encodeURIComponent(first);
+      document.getElementById('others').textContent = rest.length ? 'Other addresses of this PC: ' + rest.join(', ') : '';
+      document.getElementById('gameDot').classList.toggle('ok', r.plugin);
+      document.getElementById('gameTxt').textContent = r.plugin ? 'Game connected' : 'Waiting for the game, start American Truck Simulator';
+    } catch { /* server restarting */ }
+  }
+  refresh();
+  setInterval(refresh, 3000);
+</script>
+</body>
+</html>

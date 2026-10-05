@@ -1,0 +1,1589 @@
+import { rotateRight } from '@truckermudgeon/base/array';
+import { assert, assertExists } from '@truckermudgeon/base/assert';
+import { areSetsEqual } from '@truckermudgeon/base/equals';
+import type { Extent, Position } from '@truckermudgeon/base/geom';
+import { contains, distance, getExtent } from '@truckermudgeon/base/geom';
+import { mapValues, putIfAbsent } from '@truckermudgeon/base/map';
+import { UnreachableError } from '@truckermudgeon/base/precon';
+import type { MapDataKeys, MappedDataForKeys } from '@truckermudgeon/io';
+import {
+  AtsSelectableDlcs,
+  Ets2SelectableDlcs,
+  FacilitySpawnPointTypes,
+  ItemType,
+  toAtsDlcGuards,
+  toEts2DlcGuards,
+  toFacilityIcon,
+} from '@truckermudgeon/map/constants';
+import { toDealerLabel } from '@truckermudgeon/map/labels';
+import type { Lane } from '@truckermudgeon/map/prefabs';
+import { calculateLaneInfo, toMapPosition } from '@truckermudgeon/map/prefabs';
+import {
+  fromAtsCoordsToWgs84,
+  fromEts2CoordsToWgs84,
+} from '@truckermudgeon/map/projections';
+import { getLaneSpeedClass } from '@truckermudgeon/map/roads';
+import type { Direction } from '@truckermudgeon/map/routing';
+import type {
+  CompanyItem,
+  Country,
+  FacilityIcon,
+  GraphData,
+  MapArea,
+  Neighbor,
+  Node,
+  Poi,
+  Prefab,
+  PrefabDescription,
+  ServiceArea,
+  WithPath,
+} from '@truckermudgeon/map/types';
+import { featureCollection, lineString, point } from '@turf/helpers';
+import type { Quadtree } from 'd3-quadtree';
+import { quadtree } from 'd3-quadtree';
+import type { GeoJSON } from 'geojson';
+import { buildDlcGuardSpatialIndex, dlcGuardMapDataKeys } from '../dlc-guards';
+import { createNormalizeFeature } from '../geo-json/normalize';
+import { logger } from '../logger';
+
+type GraphContextMappedData = MappedDataForKeys<
+  [
+    'nodes',
+    'roads',
+    'roadLooks',
+    'prefabs',
+    'prefabDescriptions',
+    'companies',
+    'ferries',
+    'countries',
+  ]
+>;
+
+type DebugFC = GeoJSON.FeatureCollection<
+  GeoJSON.Point | GeoJSON.LineString,
+  { debugType: 'overview' | 'detail' }
+>;
+
+type Context = GraphContextMappedData & {
+  prefabLanes: Map<string, Map<number, Lane[]>>;
+  companiesByPrefabItemId: Map<bigint, CompanyItem>;
+  countriesById: Map<number, Country>;
+  roadQuadTree: Quadtree<{
+    x: number;
+    y: number;
+    roadLookToken: string;
+  }>;
+  getDlcGuard: (node: Node) => number;
+  graphDebug: DebugFC;
+};
+
+export const graphMapDataKeys = [
+  ...dlcGuardMapDataKeys,
+  'companies',
+  'ferries',
+  'mapAreas',
+  'prefabDescriptions',
+  'roadLooks',
+  'countries',
+  'cities',
+] satisfies MapDataKeys;
+
+type GraphMappedData = MappedDataForKeys<typeof graphMapDataKeys>;
+
+export function generateGraph(
+  tsMapData: GraphMappedData,
+): GraphData & { graphDebug: DebugFC } {
+  const {
+    map,
+    countries,
+    nodes: _nodes,
+    roads: _roads,
+    prefabs: _prefabs,
+    companies: _companies,
+    ferries,
+    pois,
+    mapAreas,
+    prefabDescriptions,
+    roadLooks,
+  } = tsMapData;
+  const dlcGuardSpatialIndex = buildDlcGuardSpatialIndex(tsMapData);
+  const getDlcGuard = (node: Node): number =>
+    assertExists(dlcGuardSpatialIndex.findClosest(node.x, node.y)).dlcGuard;
+  const toNode = (nodeUid: bigint): Node => assertExists(nodes.get(nodeUid));
+
+  const graphDebug: DebugFC = featureCollection([]);
+
+  //
+  // Set up supporting data based on input data
+  //
+
+  // Part of the pre-processing phase involves deleting entries from the nodes
+  // and prefabs maps. Create mutable copies to allow for this.
+  const nodes = new Map(_nodes);
+  const prefabs = new Map(_prefabs);
+  const roads = new Map(_roads);
+
+  // delete roads + prefabs in unselectable dlc content.
+  const guards: Set<number> =
+    map === 'usa'
+      ? toAtsDlcGuards(AtsSelectableDlcs)
+      : toEts2DlcGuards(Ets2SelectableDlcs);
+  for (const [key, prefab] of prefabs) {
+    if (!guards.has(prefab.dlcGuard)) {
+      prefabs.delete(key);
+    }
+  }
+  for (const [key, road] of roads) {
+    if (!guards.has(road.dlcGuard)) {
+      roads.delete(key);
+    }
+  }
+
+  const companies = new Map(
+    [..._companies.entries()].filter(([, company]) =>
+      // filter out companies in unknown cities (e.g., cities in upcoming DLC)
+      tsMapData.cities.has(company.cityToken),
+    ),
+  );
+  const companiesByPrefabItemId = new Map(
+    companies.values().map(company => {
+      const companyPrefabUid = company.prefabUid;
+      assert(prefabs.has(companyPrefabUid));
+      return [companyPrefabUid, company];
+    }),
+  );
+
+  const prefabsWithFacilities = new Set<Prefab>(
+    prefabs.values().filter(prefab => {
+      const prefabDesc = assertExists(prefabDescriptions.get(prefab.token));
+      return (
+        prefabDesc.spawnPoints.some(sp =>
+          FacilitySpawnPointTypes.has(sp.type),
+        ) || prefabDesc.triggerPoints.some(tp => tp.action === 'hud_parking')
+      );
+    }),
+  );
+
+  const countriesById = new Map<number, Country>(
+    countries.values().map(country => [country.id, country]),
+  );
+
+  const roadQuadTree = quadtree<{
+    x: number;
+    y: number;
+    roadLookToken: string;
+  }>()
+    .x(e => e.x)
+    .y(e => e.y);
+  for (const road of roads.values()) {
+    const startNode = assertExists(nodes.get(road.startNodeUid));
+    const endNode = assertExists(nodes.get(road.endNodeUid));
+    roadQuadTree.add({
+      x: startNode.x,
+      y: startNode.y,
+      roadLookToken: road.roadLookToken,
+    });
+    roadQuadTree.add({
+      x: endNode.x,
+      y: endNode.y,
+      roadLookToken: road.roadLookToken,
+    });
+  }
+
+  const toSectorKey = (o: { x: number; y: number }) =>
+    `${Math.floor(o.x / 4000)},${Math.floor(o.y / 4000)}`;
+  const nodesBySector = new Map<string, Node[]>();
+  const getRoadOrPrefab = (id: bigint) => roads.get(id) ?? prefabs.get(id);
+  for (const node of nodes.values()) {
+    const { forwardItemUid, backwardItemUid } = node;
+    const connectedItem =
+      getRoadOrPrefab(forwardItemUid) ?? getRoadOrPrefab(backwardItemUid);
+    if (connectedItem) {
+      putIfAbsent(toSectorKey(node), [], nodesBySector).push(node);
+    }
+  }
+
+  //
+  // Pre-process data for islands, i.e., prefabs that aren't linked to other
+  // prefabs or roads via node forward/backward item references (e.g., the
+  // prefab used for gas station pumps):
+  // - collect references to islands
+  // - deletes references to islands from `nodes`, `nodesBySector`, `prefabs`,
+  //   and `prefabsWithFacilities`
+  //
+
+  // Search for company and facility prefab islands. Remove such prefabs and
+  // their associated nodes from our lookup tables, in the hopes that the
+  // regular graph-building logic + fallback graph-building logic will produce
+  // connected routes for all companies and facilities.
+  const islandCompanyPrefabs: Prefab[] = [];
+  // Note: this set may contain entries in islandCompanyPrefabs (the
+  // intersection of the sets seems to be made up of truck dealers, only).
+  const islandFacilityPrefabs = new Set<Prefab>();
+  let connectedFacilityPrefabsCount = 0;
+  const allPrefabs = [...prefabs.values()];
+  for (const prefab of allPrefabs) {
+    const prefabNodes = prefab.nodeUids.map(toNode);
+
+    // check if `prefab` is an "island" that is disconnected from any other
+    // roads / prefabs.
+    const isIsland = prefabNodes.every(
+      node =>
+        (node.forwardItemUid === prefab.uid &&
+          getRoadOrPrefab(node.backwardItemUid) == null) ||
+        (node.backwardItemUid === prefab.uid &&
+          getRoadOrPrefab(node.forwardItemUid) == null),
+    );
+    if (!isIsland) {
+      if (prefabsWithFacilities.has(prefab)) {
+        connectedFacilityPrefabsCount++;
+      }
+      // this prefab is fine; it's connected to other roads / prefabs and should
+      // be reachable.
+      continue;
+    }
+
+    // delete the unreachable island prefab from the lookup tables, but mark it
+    // for later graph massaging if it's a company or contains facilities, since
+    // we want to be able to route to the company and/or facilities.
+
+    prefabs.delete(prefab.uid);
+    // delete prefab nodes from `nodes` map
+    prefab.nodeUids.forEach(id => nodes.delete(id));
+    // delete prefab nodes from `nodesBySector`
+    const prefabNodeUids = new Set(prefab.nodeUids);
+    const sectorKey = toSectorKey(prefab);
+    // DashLink: the sector may be absent when its .base file was skipped.
+    const sectorNodes = nodesBySector.get(sectorKey);
+    if (sectorNodes) {
+      nodesBySector.set(
+        sectorKey,
+        sectorNodes.filter(node => !prefabNodeUids.has(node.uid)),
+      );
+    }
+
+    if (companiesByPrefabItemId.has(prefab.uid)) {
+      islandCompanyPrefabs.push(prefab);
+    }
+    if (prefabsWithFacilities.has(prefab)) {
+      islandFacilityPrefabs.add(prefab);
+      prefabsWithFacilities.delete(prefab);
+    }
+  }
+  logger.info('island company prefabs', islandCompanyPrefabs.length);
+  logger.info('island facility prefabs', islandFacilityPrefabs.size);
+  logger.info('connected facility prefabs', connectedFacilityPrefabsCount);
+
+  //
+  // Build the graph
+  //
+
+  logger.log('building graph...');
+
+  const context: Context = {
+    map,
+    countries,
+    nodes,
+    roads,
+    roadLooks,
+    prefabs,
+    prefabDescriptions,
+    prefabLanes: mapValues(prefabDescriptions, prefabDesc =>
+      calculateLaneInfo(prefabDesc),
+    ),
+    companies,
+    companiesByPrefabItemId,
+    countriesById,
+    ferries,
+    roadQuadTree,
+    getDlcGuard,
+    graphDebug,
+  };
+
+  // keyed by node uids
+  const graph = new Map<
+    bigint,
+    { forward: Neighbor[]; backward: Neighbor[] }
+  >();
+  for (const node of nodes.values()) {
+    const neighbors = {
+      forward: getNeighborsInDirection(node, 'forward', context),
+      backward: getNeighborsInDirection(node, 'backward', context),
+    };
+    const hasNeighbors = neighbors.forward.length || neighbors.backward.length;
+    if (hasNeighbors) {
+      graph.set(node.uid, neighbors);
+    }
+  }
+
+  updateGraphWithFerries(graph, context);
+
+  //
+  // Post-process graph
+  //
+
+  // Problematic intersections.
+  //
+  // Look for "dead end" nodes that can be exited in one direction, but can't be
+  // exited in the opposite direction. such dead-end nodes should be exit-able
+  // in any direction; e.g., if i start at a dead-end node, and there's a valid
+  // edge in the backward direction to node N, then i should be able to reach
+  // node N in the forward direction, too.
+  // establish an exit edge in the opposite direction to deal with "bad"
+  // intersections, like the one near the Wallbert warehouse in sacramento.
+  let fudged = 0;
+  for (const [nodeId, edges] of graph.entries()) {
+    const node = assertExists(nodes.get(nodeId));
+    const forwardItem =
+      roads.get(node.forwardItemUid) ?? prefabs.get(node.forwardItemUid);
+    const backwardItem =
+      roads.get(node.backwardItemUid) ?? prefabs.get(node.backwardItemUid);
+    if (
+      !forwardItem &&
+      edges.forward.length === 0 &&
+      edges.backward.length > 0
+    ) {
+      const backwardEdges = edges.backward.filter(edge => {
+        const node = graph.get(edge.nodeUid);
+        if (!node) {
+          return false;
+        }
+        return [...node.forward, ...node.backward].some(
+          returnEdge => returnEdge.nodeUid === nodeId,
+        );
+      });
+      for (const edge of backwardEdges) {
+        edges.forward.push(edge);
+        fudged++;
+      }
+    } else if (
+      !backwardItem &&
+      edges.backward.length === 0 &&
+      edges.forward.length > 0
+    ) {
+      const forwardEdges = edges.forward.filter(edge => {
+        const node = graph.get(edge.nodeUid);
+        if (!node) {
+          return false;
+        }
+        return [...node.forward, ...node.backward].some(
+          returnEdge => returnEdge.nodeUid === nodeId,
+        );
+      });
+      for (const edge of forwardEdges) {
+        edges.backward.push(edge);
+        fudged++;
+      }
+    }
+  }
+  logger.info(fudged, 'hacky dead-end edges added');
+
+  // Island companies.
+  //
+  // Deal with island companies (i.e., company nodes that haven't been
+  // connected to a prefab node in prior graph-building steps) by forcing a
+  // connection to the closest node.
+  for (const prefab of islandCompanyPrefabs) {
+    const company = assertExists(companiesByPrefabItemId.get(prefab.uid));
+    const companyNode = assertExists(nodes.get(company.nodeUid));
+    assert(!graph.has(companyNode.uid));
+    // at ths point, companyNodeUid is completely absent in the graph.
+    // link the company node to the closest node already in the graph.
+    const nodesInSectorRange = getObjectsInSectorRange(
+      companyNode,
+      nodesBySector,
+    );
+    let closest = nodesInSectorRange
+      .sort((a, b) => distance(a, companyNode) - distance(b, companyNode))
+      .find(n => n.uid !== companyNode.uid);
+    if (!closest) {
+      logger.error('no eligible nodes for', company.token, company.cityToken);
+      throw new Error();
+    }
+    const closestInGraph = nodesInSectorRange
+      .sort((a, b) => distance(a, companyNode) - distance(b, companyNode))
+      .find(n => n.uid !== companyNode.uid && graph.has(n.uid));
+    if (closestInGraph && closest.uid !== closestInGraph.uid) {
+      logger.warn(
+        `${company.cityToken}.${company.token} ${company.uid.toString(16)}:`,
+        `graph does not contain entry for node ${closest.uid.toString(16)};`,
+        `using ${closestInGraph.uid.toString(16)} instead.`,
+        distance(closest, companyNode),
+        'vs',
+        distance(closestInGraph, companyNode),
+      );
+      closest = closestInGraph;
+    }
+    assert(graph.has(closest.uid));
+    //logger.info(
+    //  'hacked connection',
+    //  Number(dist.toFixed(3)),
+    //  company.token,
+    //  company.cityToken,
+    //  closest.uid.toString(16),
+    //);
+    // establish edges from company node to closest node
+    graphDebug.features.push(
+      createDebugLineString(
+        companyNode,
+        closest,
+        'island:company-to-closest',
+        'detail',
+      ),
+    );
+    graph.set(companyNode.uid, {
+      forward: [
+        createNeighbor(companyNode, closest, 'forward', getDlcGuard),
+        createNeighbor(companyNode, closest, 'backward', getDlcGuard),
+      ],
+      backward: [],
+    });
+    // establish edges from closest node to company node
+    const neighbors = graph.get(closest.uid)!;
+    graphDebug.features.push(
+      createDebugLineString(
+        closest,
+        companyNode,
+        'island:closest-to-company',
+        'detail',
+      ),
+    );
+    neighbors.forward.push(
+      createNeighbor(closest, companyNode, 'forward', getDlcGuard),
+      createNeighbor(closest, companyNode, 'backward', getDlcGuard),
+    );
+    neighbors.backward.push(
+      createNeighbor(closest, companyNode, 'forward', getDlcGuard),
+      createNeighbor(closest, companyNode, 'backward', getDlcGuard),
+    );
+  }
+
+  logger.info(islandCompanyPrefabs.length, 'hacky company edges added');
+
+  // HACK deal with the prefab intersection that enters the wal_mkt company in
+  // Lamar, Colorado. Connectivity says it can enter the wal_mkt, but it can
+  // never exit, so fudge an edge that says we _can_ exit.
+  // TODO write a general solution and search for all prefab intersections that
+  //  lead into a company prefab one-way, then add fudged edges (similar to the
+  //  dead-end fudging earlier).
+  if (map === 'usa' && graph.has(0x3301e888d4055f5en)) {
+    const hackNeighbors = assertExists(graph.get(0x3301e888d4055f5en));
+    hackNeighbors.forward.push({
+      nodeUid: 0x3301e888b6855e83n,
+      duration: calculateDurationSeconds(30, 32),
+      distance: 32,
+      direction: 'forward',
+      dlcGuard: 13, // The DLC Guard value for Colorado, which is where Lamar is.
+    });
+  }
+
+  logger.info(
+    graph.size,
+    'nodes,',
+    graph
+      .values()
+      .reduce((acc, ns) => acc + ns.forward.length + ns.backward.length, 0),
+    'edges',
+  );
+
+  // TODO the graph currently being generated still includes disconnected
+  //  sub-graphs (e.g., 4a3f975872850005). Figure out why, and either detect +
+  //  exclude them or find the bug.
+
+  // Facilities.
+
+  // notes:
+  // - "entry" nodes to prefabs are ones that either:
+  //    - link a road-prefab/road to a prefab referenced by a company
+  //    - link a road-prefab/road to 0, and are near a navigation mapArea
+  //      (which is assumed to overlap a larger mapArea containing facilities).
+
+  // Note: we're building these maps _now_ instead of _before_ the "delete
+  // island references from nodes and prefabs" step. Not sure if this is right.
+  const areafulPrefabsBySector = new Map<
+    string,
+    {
+      prefab: Prefab;
+      mbr: Extent;
+    }[]
+  >();
+  for (const prefab of prefabs.values()) {
+    const prefabDesc = assertExists(prefabDescriptions.get(prefab.token));
+    const polygonPoints = prefabDesc.mapPoints.filter(
+      mp => mp.type === 'polygon',
+    );
+    if (polygonPoints.length === 0) {
+      continue;
+    }
+
+    const tx = (pos: Position) => toMapPosition(pos, prefab, prefabDesc, nodes);
+    const mbr = getExtent(polygonPoints.map(pp => tx([pp.x, pp.y])));
+    const sectorKey = toSectorKey(prefab);
+    putIfAbsent(sectorKey, [], areafulPrefabsBySector).push({ prefab, mbr });
+  }
+
+  const mapAreasBySector = new Map<
+    string,
+    { mapArea: MapArea; mbr: Extent }[]
+  >();
+  for (const mapArea of mapAreas.values()) {
+    const mbr = getExtent(mapArea.nodeUids.map(toNode));
+    const sectorKey = toSectorKey(mapArea);
+    putIfAbsent(sectorKey, [], mapAreasBySector).push({ mapArea, mbr });
+  }
+
+  const facilityNodes = new Map<
+    // TODO should we include all of a prefab's node uids, instead of one?
+    bigint, // one of the containing prefab's prefab node ids
+    ServiceArea
+  >();
+
+  // Connected facility prefabs
+  const knownGraphNodes = new Set(graph.keys());
+  for (const prefab of prefabsWithFacilities) {
+    assert(!islandFacilityPrefabs.has(prefab));
+    const { key, value } = getPrefabFacilitiesEntry(prefab, {
+      prefabDescriptions,
+      nodes,
+      knownGraphNodes,
+    });
+    assert(!facilityNodes.has(key));
+    facilityNodes.set(key, value);
+  }
+
+  // Island facility prefabs.
+  //
+  // Match island facility prefabs to larger, reachable prefabs (like a truck
+  // stop prefab or a company prefab) that contain them.
+  // Find the prefab node of those containing prefabs closest to a facility,
+  // then associate those prefab nodes with a facility entry.
+  const containingPrefabs = new Set<Prefab>();
+  logger.log(
+    'checking',
+    islandFacilityPrefabs.size,
+    'island facility prefabs for containing prefabs',
+  );
+  for (const islandPrefab of islandFacilityPrefabs) {
+    const otherPrefabs = getObjectsInSectorRange(
+      islandPrefab,
+      areafulPrefabsBySector,
+    ).filter(({ prefab }) => prefab.uid !== islandPrefab.uid);
+
+    const ipfns = islandPrefab.nodeUids.map(id =>
+      // note: must check original `_nodes` map, because `nodes` is guaranteed
+      // not to contain any of an island prefab's nodes :-/
+      assertExists(_nodes.get(id)),
+    );
+    const containingPrefab = otherPrefabs.find(p =>
+      ipfns.some(ipfn => contains(p.mbr, ipfn)),
+    )?.prefab;
+    if (!containingPrefab) {
+      // this island has no containing prefab. it might have a containing
+      // map area, or it might need special treatment.
+      continue;
+    }
+
+    const cpns = containingPrefab.nodeUids.map(id =>
+      assertExists(nodes.get(id)),
+    );
+    // assert containing prefab is connected and doesn't already contain another
+    // island prefab
+    assert(
+      cpns.some(n => graph.has(n.uid)),
+      `containing prefab must be connected in graph`,
+    );
+    if (map === 'usa') {
+      assert(
+        !containingPrefabs.has(containingPrefab),
+        `containing prefab cannot contain more than 1 island prefab`,
+      );
+    } else if (map === 'europe') {
+      if (containingPrefabs.has(containingPrefab)) {
+        logger.warn(
+          'containing prefab',
+          containingPrefab.uid.toString(16),
+          'already contains an island',
+        );
+      }
+    } else {
+      logger.error('unsupported map', map);
+      throw new UnreachableError(map);
+    }
+    containingPrefabs.add(containingPrefab);
+
+    const { key, value } = getPrefabFacilitiesEntry(containingPrefab, {
+      prefabDescriptions,
+      nodes,
+      knownGraphNodes,
+    });
+
+    if (facilityNodes.has(key)) {
+      const existing = facilityNodes.get(key)!;
+      assert(existing.itemUid === value.itemUid);
+      assert(areSetsEqual(existing.facilities, value.facilities));
+      logger.warn('encountered a benign duplicate key', key.toString(16));
+      continue;
+    }
+
+    facilityNodes.set(key, {
+      ...value,
+      facilities: new Set([
+        // the facilities of `containingPrefab`
+        ...value.facilities,
+        // the facilities of `islandPrefab`
+        ...getFacilities(
+          assertExists(prefabDescriptions.get(islandPrefab.token)),
+        ),
+      ]),
+      description:
+        value.description !== ''
+          ? value.description
+          : toServiceAreaDescription(
+              context.prefabDescriptions.get(
+                islandPrefab.token,
+              ) as WithPath<PrefabDescription>,
+            ),
+    });
+
+    logger.info(
+      'islandPrefab',
+      islandPrefab.token,
+      'contained by',
+      containingPrefab.token,
+    );
+    islandFacilityPrefabs.delete(islandPrefab);
+  }
+
+  logger.log(
+    'checking',
+    islandFacilityPrefabs.size,
+    'island facility prefabs for containing map areas',
+  );
+  const islandAreas = new Map<MapArea, Prefab[]>();
+  for (const islandPrefab of islandFacilityPrefabs) {
+    const mapAreas = getObjectsInSectorRange(islandPrefab, mapAreasBySector);
+    const ipfns = islandPrefab.nodeUids.map(id =>
+      // note: must check original `_nodes` map, because `nodes` is guaranteed
+      // not to contain any of an island prefab's nodes :-/
+      assertExists(_nodes.get(id)),
+    );
+    const containingMapArea = mapAreas
+      .filter(({ mbr }) => ipfns.some(ipfn => contains(mbr, ipfn)))
+      .sort((a, b) => largestFirstComparator(a.mbr, b.mbr))[0];
+    if (!containingMapArea) {
+      // island prefab isn't contained within a map area. ignore it for now;
+      // will be dealt with in final pass through `islandFacilityPrefabs`.
+      continue;
+    }
+
+    // find existing graph node within a map area node
+    // TODO find "entrance" map area and use node closest to that, if found.
+
+    const containedNodes = getObjectsInSectorRange(
+      containingMapArea.mapArea,
+      nodesBySector,
+    ).filter(
+      node => graph.has(node.uid) && contains(containingMapArea.mbr, node),
+    );
+    if (containedNodes.length === 0) {
+      // map area contains the island prefab, but can't reach the map area.
+      // Save them for later processing.
+      putIfAbsent(containingMapArea.mapArea, [], islandAreas).push(
+        islandPrefab,
+      );
+      islandFacilityPrefabs.delete(islandPrefab);
+      continue;
+    }
+
+    const prefabDesc = assertExists(prefabDescriptions.get(islandPrefab.token));
+    const tx = ({ x, y }: { x: number; y: number }) =>
+      toMapPosition([x, y], islandPrefab, prefabDesc, _nodes);
+    const { facilityPoints: fps, facilities: islandFacilities } =
+      getFacilitiesAndPoints(prefabDesc, tx);
+    const closestContainedNodeUid = containedNodes.sort((a, b) => {
+      const minDistA = Math.min(...fps.map(fp => distance(fp, a)));
+      const minDistB = Math.min(...fps.map(fp => distance(fp, b)));
+      return minDistA - minDistB;
+    })[0].uid;
+    const facility = putIfAbsent(
+      closestContainedNodeUid,
+      {
+        facilities: getFacilities(prefabDesc),
+        itemUid: containingMapArea.mapArea.uid,
+        itemType: ItemType.MapArea,
+        description: toServiceAreaDescription(
+          prefabDesc as WithPath<PrefabDescription>,
+        ),
+      },
+      facilityNodes,
+    );
+    islandFacilities.forEach(f => facility.facilities.add(f));
+    islandFacilityPrefabs.delete(islandPrefab);
+  }
+  const facilityNodesByMapArea = new Map<bigint, ServiceArea>(
+    facilityNodes
+      .values()
+      .filter(v => v.itemType === ItemType.MapArea)
+      .map(v => [v.itemUid, v]),
+  );
+
+  if (islandAreas.size > 0) {
+    logger.log(
+      'checking',
+      islandAreas.size,
+      'island prefab-containing map areas for nearest node',
+    );
+    // TODO prefer 'dead end' nodes (nodes with a forward or backward item id of
+    // 0), assuming that they're nodes for prefab intersections leading to map
+    // areas.
+  }
+
+  logger.info(
+    'checking',
+    islandFacilityPrefabs.size,
+    'island facility prefabs for nearest prefabs / map areas',
+  );
+
+  logger.info('service areas', facilityNodes.size);
+
+  // Parking.
+  // associate trigger- and overlay-based parking POIs with prefab or map area
+  let ignoredCount = 0;
+  let inPrefab = 0;
+  let inArea = 0;
+  let inUnknownArea = 0;
+  const uncontainedParking: Poi[] = [];
+  for (const poi of pois) {
+    if (poi.type !== 'facility' || poi.icon !== 'parking_ico') {
+      continue;
+    }
+    const fromItemType = poi.fromItemType;
+    if (fromItemType !== 'trigger' && fromItemType !== 'mapOverlay') {
+      continue;
+    }
+
+    const prefabs = getObjectsInSectorRange(poi, areafulPrefabsBySector);
+    const containingPrefab = prefabs.find(p => contains(p.mbr, poi));
+    if (containingPrefab) {
+      const prefabDesc = assertExists(
+        prefabDescriptions.get(containingPrefab.prefab.token),
+      );
+      if (prefabDesc.triggerPoints.some(tp => tp.action === 'hud_parking')) {
+        // TODO: why are we ignoring this? is it because it's accounted for by
+        // whatever is calling `getFacilities`?
+        ignoredCount++;
+      } else {
+        inPrefab++;
+      }
+      continue;
+    }
+
+    const mapAreas = getObjectsInSectorRange(poi, mapAreasBySector);
+    const containingArea = mapAreas.find(a => contains(a.mbr, poi));
+    if (containingArea) {
+      // link
+      inArea++;
+      if (facilityNodesByMapArea.has(containingArea.mapArea.uid)) {
+        facilityNodesByMapArea
+          .get(containingArea.mapArea.uid)!
+          .facilities.add('parking_ico');
+      } else {
+        inUnknownArea++;
+      }
+
+      continue;
+    }
+
+    uncontainedParking.push(poi);
+  }
+  logger.info(
+    inPrefab,
+    inArea,
+    ignoredCount,
+    inUnknownArea,
+    'prefab, area, ignored, unknown area',
+  );
+  // parking spots not present in a prefab, or a map area.
+  // list first 5.
+  // maybe they can be associated with nearby prefabs / map areas? e.g.,
+  // 35.640/-94.877 {
+  //   x: 5143.46484375,
+  //   y: 18881.69921875,
+  //   sectorX: 1,
+  //   sectorY: 4,
+  //   type: 'facility',
+  //   dlcGuard: 25,
+  //   itemNodeUids: [
+  //     '4e0e5570c351308a',
+  //     '4e0e55702711308b',
+  //     '4e0e55703691308c',
+  //     '4e0e5570c651308d',
+  //     '4e0e55706cd1308e',
+  //     '4e0e5570a811308f',
+  //     '4e0e55709bd13090'
+  //   ],
+  //   icon: 'parking_ico',
+  //   fromItemType: 'trigger'
+  // }
+  // is awfully close to a map area.
+  logger.warn('uncontained parking', uncontainedParking.length);
+  if (uncontainedParking.length) {
+    const project =
+      map === 'usa' ? fromAtsCoordsToWgs84 : fromEts2CoordsToWgs84;
+    for (let i = 0; i < Math.min(5, uncontainedParking.length); i++) {
+      const poi = uncontainedParking[i];
+      console.log(
+        project([poi.x, poi.y])
+          .reverse()
+          .map(f => f.toFixed(3))
+          .join('/'),
+        poi,
+      );
+    }
+  }
+
+  // Simple graph checks.
+
+  const nodesWithEdgesTo = new Set<bigint>();
+  for (const neighbors of graph.values()) {
+    for (const n of neighbors.forward) {
+      nodesWithEdgesTo.add(n.nodeUid);
+    }
+    for (const n of neighbors.backward) {
+      nodesWithEdgesTo.add(n.nodeUid);
+    }
+  }
+
+  const nodesWithoutEdgesTo = new Set<bigint>();
+  for (const [nodeUid, neighbors] of graph.entries()) {
+    if (neighbors.forward.length === 0 && neighbors.backward.length === 0) {
+      logger.warn('no edge _from_', nodeUid);
+    }
+    if (!nodesWithEdgesTo.has(nodeUid)) {
+      //logger.warn('no edge _to_', nodeUid);
+      nodesWithoutEdgesTo.add(nodeUid);
+    }
+  }
+  // maybe this is ok? e.g., one-way roads that dead-end somewhere?
+  // TODO look into these.
+  logger.warn('no edges to', nodesWithoutEdgesTo.size, 'nodes');
+
+  // verify facilityNodes have at least one edge _to_ them and at least one edge
+  // _from_ them.
+  const unreachableFacilityNodes = new Set<bigint>();
+  for (const nodeUid of facilityNodes.keys()) {
+    const neighbors = assertExists(graph.get(nodeUid));
+    // verify facility node can be routed _from_
+    assert(neighbors.backward.length > 0 || neighbors.forward.length > 0);
+    // verify facility node can be routed _to_
+    if (!nodesWithEdgesTo.has(nodeUid)) {
+      // why? is it because of one-way roads? if so, should they be coerced
+      // into two-way roads?
+      // what if we checked prefabs inside map areas associated with these
+      // nodes, then forced them to be two-way?
+      unreachableFacilityNodes.add(nodeUid);
+      const node = assertExists(nodes.get(nodeUid));
+      graphDebug.features.push(
+        point([node.x, node.y], {
+          tag: 'facility:unreachable',
+          debugType: 'overview',
+        }),
+      );
+    }
+  }
+  logger.warn('no edges to', unreachableFacilityNodes.size, 'facility nodes');
+
+  const unknownEdges = new Set<bigint>();
+  for (const nid of graph.keys()) {
+    const node = assertExists(nodes.get(nid));
+    const entry = assertExists(graph.get(nid));
+
+    const neighbors = [...entry.backward, ...entry.forward];
+    for (const e of neighbors) {
+      const destEntry = graph.get(e.nodeUid);
+      if (!destEntry) {
+        const destNode = assertExists(nodes.get(e.nodeUid));
+        graphDebug.features.push(
+          lineString(
+            [
+              [node.x, node.y],
+              [destNode.x, destNode.y],
+            ],
+            {
+              debugType: 'overview',
+              tag: 'edge:unknown-node',
+              color: '#f00',
+              unknownNodeUid: destNode.uid.toString(16),
+            },
+          ),
+        );
+        unknownEdges.add(e.nodeUid);
+        continue;
+      }
+      const destNode = assertExists(nodes.get(e.nodeUid));
+      const destNeighbors = [...destEntry.forward, ...destEntry.backward];
+      const color = destNeighbors.some(n => n.nodeUid === nid)
+        ? '#0c08' // two-way connectivity
+        : '#ca08'; // one-way connectivity
+      graphDebug.features.push(
+        lineString(
+          [
+            [node.x, node.y],
+            [destNode.x, destNode.y],
+          ],
+          {
+            debugType: 'overview',
+            color,
+          },
+        ),
+      );
+    }
+  }
+  graph.keys().forEach(nid => {
+    const { x, y } = assertExists(nodes.get(nid));
+    graphDebug.features.push(
+      point([x, y], {
+        tag: 'graphNode',
+        id: nid.toString(16),
+        debugType: 'detail',
+      }),
+    );
+  });
+  if (unknownEdges.size) {
+    logger.warn(unknownEdges.size, 'unknown nodes with edges to them.');
+    // const some = [...unknownEdges.values()].slice(0, 5);
+    // console.log(
+    //   some
+    //     .map(b => nodes.get(b))
+    //     .map(n => ({
+    //       uid: n?.uid.toString(16),
+    //       forwardItem: n?.forwardItemUid.toString(16),
+    //       backwardItem: n?.backwardItemUid.toString(16),
+    //     })),
+    // );
+  }
+
+  const normalize = createNormalizeFeature(map, 4);
+  graphDebug.features.map(f => normalize(f));
+
+  return {
+    graph,
+    serviceAreas: facilityNodes,
+    graphDebug,
+  };
+}
+
+function updateGraphWithFerries(
+  graph: Map<
+    bigint,
+    {
+      forward: Neighbor[];
+      backward: Neighbor[];
+    }
+  >,
+  context: Context,
+) {
+  const { nodes, prefabs, ferries, getDlcGuard } = context;
+  const newGraphNode = (): { forward: Neighbor[]; backward: Neighbor[] } => ({
+    forward: [],
+    backward: [],
+  });
+
+  const ferryExitFallbacks = [];
+  for (const ferry of ferries.values()) {
+    const ferryNode = assertExists(nodes.get(ferry.nodeUid));
+    let ferryEntrance: Node;
+    let ferryExit: Node;
+    assert(ferry.prefabUid != null, 'ferry must have prefab');
+    const ferryPrefab = assertExists(
+      prefabs.get(ferry.prefabUid),
+      `no prefab for ferry:\nn${JSON.stringify(ferry, null, 2)}`,
+    );
+    const prefabNodesInGraph = ferryPrefab.nodeUids.filter(nid =>
+      graph.has(nid),
+    );
+    assert(prefabNodesInGraph.length >= 1);
+
+    if (context.map === 'usa') {
+      assert(prefabNodesInGraph.length === 1);
+      ferryEntrance = assertExists(nodes.get(prefabNodesInGraph[0]));
+      // sort by closest to ferry icon, first.
+      const potentialFerryExits = ferryPrefab.nodeUids
+        .map(nid => assertExists(nodes.get(nid)))
+        .filter(node => node.backwardItemUid === 0n)
+        .sort((a, b) => distance(a, ferryNode) - distance(b, ferryNode));
+      ferryExit = assertExists(
+        potentialFerryExits[0],
+        `ferryExit must exist for ferry\n${JSON.stringify(ferry, null, 2)}`,
+      );
+    } else if (context.map === 'europe') {
+      // sort by closest to ferry icon, first.
+      // TODO what's the best way to pick a ferry exit node in ETS2?
+      let potentialFerryExits = ferryPrefab.nodeUids
+        .map(nid => assertExists(nodes.get(nid)))
+        .filter(node => node.backwardItemUid === 0n && !graph.has(node.uid))
+        .sort((a, b) => distance(a, ferryNode) - distance(b, ferryNode));
+      if (potentialFerryExits.length === 0) {
+        // ignore "no backward item id" and "mus not be in graph" constraints.
+        potentialFerryExits = ferryPrefab.nodeUids
+          .map(nid => assertExists(nodes.get(nid)))
+          .sort((a, b) => distance(a, ferryNode) - distance(b, ferryNode));
+        assert(potentialFerryExits.length > 0);
+        const node = potentialFerryExits[0];
+        ferryExitFallbacks.push({
+          name: ferry.name,
+          hasBackwardItem: node.backwardItemUid !== 0n,
+          inGraph: graph.has(node.uid),
+          distance: Math.round(distance(node, ferryNode)),
+        });
+      }
+
+      ferryExit = assertExists(
+        potentialFerryExits[0],
+        `ferryExit must exist for ferry\n${JSON.stringify(ferry, null, 2)}`,
+      );
+
+      const potentialFerryEntrances = ferryPrefab.nodeUids
+        .map(nid => assertExists(nodes.get(nid)))
+        .filter(
+          node =>
+            node.uid !== ferryExit.uid && prefabNodesInGraph.includes(node.uid),
+        )
+        .sort((a, b) => distance(b, ferryNode) - distance(a, ferryNode));
+      ferryEntrance = assertExists(
+        potentialFerryEntrances[0],
+        `ferryEntrance must exist`,
+      );
+    } else {
+      logger.error('unsupported map', context.map);
+      throw new UnreachableError(context.map);
+    }
+
+    assert(
+      ferryEntrance !== ferryExit,
+      `ferryEntrance cannot be the same as ferryExit`,
+    );
+
+    //console.log('ferry', {
+    //  token: ferry.token,
+    //  ferryEntrance: ferryEntrance.uid.toString(16),
+    //  ferryExit: ferryExit.uid.toString(16),
+    //});
+
+    // create prefab exit graph node
+    let exitGraphNode: { forward: Neighbor[]; backward: Neighbor[] };
+    if (context.map === 'usa') {
+      assert(
+        !graph.has(ferryExit.uid),
+        `graph must not already contain ferry exit for ${ferry.name}`,
+      );
+      exitGraphNode = newGraphNode();
+      graph.set(ferryExit.uid, exitGraphNode);
+    } else if (context.map === 'europe') {
+      exitGraphNode = putIfAbsent(ferryExit.uid, newGraphNode(), graph);
+    } else {
+      throw new UnreachableError(context.map);
+    }
+
+    // establish edges between prefab entrance and prefab exit
+    const entranceGraphNode = assertExists(graph.get(ferryEntrance.uid));
+    // TODO look into simplifying graph by having minimal edges created, based
+    //  on how entrance graph node is reached.
+    entranceGraphNode.forward.push(
+      createNeighbor(ferryEntrance, ferryExit, 'forward', getDlcGuard),
+    );
+    entranceGraphNode.backward.push(
+      createNeighbor(ferryEntrance, ferryExit, 'forward', getDlcGuard),
+    );
+    exitGraphNode.backward.push(
+      createNeighbor(ferryExit, ferryEntrance, 'forward', getDlcGuard),
+      createNeighbor(ferryExit, ferryEntrance, 'backward', getDlcGuard),
+    );
+
+    // create ferry graph node
+    // N.B.: may already exist, e.g., for Port Fourchon
+    const ferryGraphNode = putIfAbsent(ferry.nodeUid, newGraphNode(), graph);
+
+    // establish edges between prefab exit and ferry node
+    exitGraphNode.forward.push(
+      createNeighbor(ferryExit, ferryNode, 'forward', getDlcGuard),
+    );
+    ferryGraphNode.forward.push(
+      createNeighbor(ferryNode, ferryExit, 'backward', getDlcGuard),
+    );
+    ferryGraphNode.backward.push(
+      createNeighbor(ferryNode, ferryExit, 'backward', getDlcGuard),
+    );
+
+    // establish edges from ferry node to ferry connections
+    for (const connection of ferry.connections) {
+      const otherFerryNode = assertExists(nodes.get(connection.nodeUid));
+      ferryGraphNode.forward.push({
+        ...createNeighbor(ferryNode, otherFerryNode, 'forward', getDlcGuard),
+        distance: connection.distance * 100,
+        // TODO how to reconcile in-game time taken vs. IRL time?
+        // duration: connection.time * 60,
+        isFerry: true,
+      });
+    }
+  }
+  if (ferryExitFallbacks.length) {
+    logger.warn(
+      'fallback ferryExits',
+      ferryExitFallbacks.length,
+      '/',
+      ferries.size,
+      '\n',
+      ferryExitFallbacks,
+    );
+  }
+}
+
+function getNeighborsInDirection(
+  originNode: Node,
+  direction: 'forward' | 'backward',
+  context: Context,
+): Neighbor[] {
+  const getNeighborItemId = (n: Node) =>
+    direction === 'forward' ? n.forwardItemUid : n.backwardItemUid;
+  const getItem = (id: bigint) =>
+    context.roads.get(id) ??
+    context.prefabs.get(id) ??
+    context.companies.get(id);
+  const item = getItem(getNeighborItemId(originNode));
+  if (!item) {
+    // unknown neighbor item, e.g., a hidden or unknown road not present in context.
+    return [];
+  }
+
+  const toNeighbor = (
+    nextNode: Node,
+    options: {
+      duration?: number;
+      distance?: number;
+      direction?: 'forward' | 'backward';
+      isOneLaneRoad?: true;
+    } = {},
+  ): Neighbor => {
+    const dist =
+      options.distance ??
+      distance([nextNode.x, nextNode.y], [originNode.x, originNode.y]);
+    const dir = options.direction ?? direction;
+    const { roadLookToken } = assertExists(
+      context.roadQuadTree.find(nextNode.x, nextNode.y),
+    );
+    const speedClass = getLaneSpeedClass(
+      assertExists(context.roadLooks.get(roadLookToken)),
+    );
+
+    // TODO add support for ETS2
+    const nextCountry =
+      context.countriesById.get(
+        dir === 'forward'
+          ? nextNode.backwardCountryId
+          : nextNode.forwardCountryId,
+      ) ?? context.countriesById.get(1)!; // fallback to California or Austria
+
+    // TODO there's an urban limit value... use it if node is in a city area.
+    const speedMph =
+      (nextCountry.truckSpeedLimits[speedClass]?.limit ??
+        nextCountry.truckSpeedLimits.localRoad?.limit ??
+        30) * (context.map === 'usa' ? 1 : 0.6213712);
+
+    return {
+      nodeUid: nextNode.uid,
+      distance: dist,
+      duration: calculateDurationSeconds(speedMph, dist),
+      direction: dir,
+      isOneLaneRoad: options.isOneLaneRoad,
+      dlcGuard: context.getDlcGuard(nextNode),
+    };
+  };
+
+  switch (item.type) {
+    case ItemType.Road: {
+      const originNodeId =
+        direction === 'forward' ? item.startNodeUid : item.endNodeUid;
+      const destNodeId =
+        direction === 'forward' ? item.endNodeUid : item.startNodeUid;
+
+      assert(originNodeId === originNode.uid);
+      const roadLook = assertExists(context.roadLooks.get(item.roadLookToken));
+      const lanesInDirection =
+        direction === 'forward'
+          ? roadLook.lanesRight.length
+          : roadLook.lanesLeft.length;
+      if (lanesInDirection === 0) {
+        // can't go in direction.
+        return [];
+      }
+
+      const nextNode = assertExists(context.nodes.get(destNodeId));
+      return [
+        toNeighbor(nextNode, {
+          distance: item.length,
+          isOneLaneRoad: lanesInDirection === 1 ? true : undefined,
+        }),
+      ];
+    }
+    case ItemType.Prefab: {
+      const neighbors: Neighbor[] = [];
+      const companyItem = context.companiesByPrefabItemId.get(item.uid);
+      if (companyItem) {
+        // establish edge between `node` and the company node associated with
+        // `node`'s neighbor prefab item.
+        const nextNode = assertExists(context.nodes.get(companyItem.nodeUid));
+        if (
+          (direction === 'forward' && originNode.backwardItemUid === 0n) ||
+          (direction === 'backward' && originNode.forwardItemUid === 0n)
+        ) {
+          return neighbors;
+        }
+        neighbors.push(toNeighbor(nextNode));
+        context.graphDebug.features.push(
+          createDebugLineString(
+            originNode,
+            nextNode,
+            'gNID:Prefab:CompanyItem',
+            'detail',
+          ),
+        );
+        return neighbors;
+      }
+
+      const laneInfo = assertExists(context.prefabLanes.get(item.token));
+      assert(laneInfo.size > 0);
+
+      const connectionNodes = createConnectionsMap(
+        laneInfo,
+        item,
+        context.nodes,
+      );
+      const connections = connectionNodes.get(originNode);
+      if (connections == null) {
+        // `connectionNodes` may be missing `node` if `node` is one of those
+        // weird island unrouteable nodes that point to a prefab and nothing
+        // else, like node `61d14e464b25d87` in Carson City.
+        return neighbors;
+      }
+      if (connections.length === 0) {
+        // no connections for `node` in `direction` could mean that the prefab:
+        // - is one-way
+        // - has no internal roads connecting its nodes, e.g., in company
+        //   depots.
+        return neighbors;
+      }
+      neighbors.push(
+        // establish edges between `node` and the output nodes that the prefab
+        // connects it to.
+        ...connections.map(({ nextNode, distance }) => {
+          context.graphDebug.features.push(
+            createDebugLineString(
+              originNode,
+              nextNode,
+              'gNID:Prefab:Connection',
+              'detail',
+            ),
+          );
+          // TODO apply duration penalty for left turns
+          return toNeighbor(nextNode, {
+            distance,
+            direction:
+              getNeighborItemId(originNode) === getNeighborItemId(nextNode)
+                ? direction === 'forward'
+                  ? 'backward'
+                  : 'forward'
+                : direction,
+          });
+        }),
+      );
+      return neighbors;
+    }
+    case ItemType.Company: {
+      assert(direction === 'forward');
+      const prefab = context.prefabs.get(item.prefabUid);
+      if (!prefab) {
+        // prefab is unknown because it was removed as an "island prefab" during
+        // graph pre-processing. assume that edges to the company item's node
+        // will be added later.
+        // logger.warn(
+        //   'unknown prefab',
+        //   item.prefabUid,
+        //   'for company',
+        //   item.uid,
+        //   item.token,
+        //   item.cityToken,
+        // );
+        return [];
+      }
+      const prefabNodes = prefab.nodeUids
+        .map(id => assertExists(context.nodes.get(id)))
+        .filter(
+          node =>
+            !(
+              node.forwardItemUid === prefab.uid && node.backwardItemUid === 0n
+            ),
+        );
+      context.graphDebug.features.push(
+        ...prefabNodes.map(nextNode =>
+          createDebugLineString(
+            originNode,
+            nextNode,
+            'gNID:Company:PrefabNode',
+            'detail',
+          ),
+        ),
+      );
+      return prefabNodes.flatMap(nextNode => [
+        toNeighbor(nextNode),
+        toNeighbor(nextNode, { direction: 'backward' }),
+      ]);
+    }
+    default:
+      throw new UnreachableError(item);
+  }
+}
+
+function createConnectionsMap(
+  laneInfo: Map<number, Lane[]>,
+  item: Prefab,
+  nodes: ReadonlyMap<bigint, Node>,
+): Map<Node, { nextNode: Node; distance: number }[]> {
+  // a map of origin Nodes to a list of target Nodes
+  const connectionsMap = new Map<
+    Node,
+    { nextNode: Node; distance: number }[]
+  >();
+  const targetNodes = rotateRight(
+    item.nodeUids.map(id => nodes.get(id)),
+    item.originNodeIndex,
+  );
+  for (const [nodeIdx, lanes] of laneInfo) {
+    connectionsMap.set(
+      assertExists(targetNodes[nodeIdx]),
+      lanes.flatMap(({ branches }) =>
+        branches.map(({ curvePoints, targetNodeIndex }) => {
+          const nextNode = assertExists(targetNodes[targetNodeIndex]);
+          let totalCurveLength = 0;
+          let prevPoint = curvePoints[0];
+          for (let i = 1; i < curvePoints.length; i++) {
+            const curPoint = curvePoints[i];
+            totalCurveLength += distance(prevPoint, curPoint);
+            prevPoint = curPoint;
+          }
+          return {
+            nextNode,
+            distance: totalCurveLength,
+          };
+        }),
+      ),
+    );
+  }
+
+  // a `connectionsMap` list may have multiple entries for the same
+  // Node, because `laneInfo` also has that property. graph generation doesn't
+  // care, though, so pick the entry with the shortest distance.
+  for (const list of connectionsMap.values()) {
+    list.sort((a, b) => a.distance - b.distance);
+    const seenNextNodes = new Set<Node>();
+    for (let i = 0; i < list.length; i++) {
+      const entry = list[i];
+      const { nextNode } = entry;
+      if (seenNextNodes.has(nextNode)) {
+        list.splice(i, 1); // 2nd parameter means remove one item only
+      }
+      seenNextNodes.add(nextNode);
+    }
+  }
+
+  return connectionsMap;
+}
+
+function createDebugLineString(
+  from: Node,
+  to: Node,
+  tag: string,
+  debugType: 'overview' | 'detail',
+) {
+  return lineString(
+    [
+      [from.x, from.y],
+      [to.x, to.y],
+    ],
+    {
+      tag,
+      debugType,
+      from: from.uid.toString(16),
+      to: to.uid.toString(16),
+    },
+  );
+}
+
+// assumes speed of 30 mph
+function createNeighbor(
+  from: { x: number; y: number },
+  toNode: Node,
+  direction: Direction,
+  getDlcGuard: (n: Node) => number,
+): Neighbor {
+  const dist = distance(from, toNode);
+  return {
+    nodeUid: toNode.uid,
+    distance: dist,
+    duration: calculateDurationSeconds(30, dist),
+    direction,
+    dlcGuard: getDlcGuard(toNode),
+  };
+}
+
+function getObjectsInSectorRange<T>(
+  pos: { x: number; y: number },
+  objectsBySector: Map<string, T[]>,
+): T[] {
+  const toKey = (x: number, y: number) => `${x},${y}`;
+  let { x: sx, y: sy } = pos;
+  sx = Math.floor(sx / 4000);
+  sy = Math.floor(sy / 4000);
+  return [
+    ...(objectsBySector.get(toKey(sx - 1, sy - 1)) ?? []),
+    ...(objectsBySector.get(toKey(sx + 0, sy - 1)) ?? []),
+    ...(objectsBySector.get(toKey(sx + 1, sy - 1)) ?? []),
+    ...(objectsBySector.get(toKey(sx - 1, sy + 0)) ?? []),
+    ...(objectsBySector.get(toKey(sx + 0, sy + 0)) ?? []),
+    ...(objectsBySector.get(toKey(sx + 1, sy + 0)) ?? []),
+    ...(objectsBySector.get(toKey(sx - 1, sy + 1)) ?? []),
+    ...(objectsBySector.get(toKey(sx + 0, sy + 1)) ?? []),
+    ...(objectsBySector.get(toKey(sx + 1, sy + 1)) ?? []),
+  ];
+}
+
+/**
+ * Returns a key and value, where:
+ * - `value` is a Prefab or MapArea item containing a set of facilities, and
+ * - `key` is the node uid used to navigate to the value
+ *
+ * @param prefab a Prefab with facilities
+ * @param context context needed to perform this calculation
+ */
+function getPrefabFacilitiesEntry(
+  prefab: Prefab,
+  context: {
+    prefabDescriptions: ReadonlyMap<string, PrefabDescription>;
+    nodes: ReadonlyMap<bigint, Node>;
+    knownGraphNodes: ReadonlySet<bigint>;
+  },
+): {
+  key: bigint;
+  value: ServiceArea;
+} {
+  const { prefabDescriptions, nodes } = context;
+  const pfns = prefab.nodeUids
+    .filter(id => context.knownGraphNodes.has(id))
+    .map(id => assertExists(nodes.get(id)));
+  assert(pfns.length > 0);
+  const prefabDesc = assertExists(prefabDescriptions.get(prefab.token));
+  const tx = ({ x, y }: { x: number; y: number }) =>
+    toMapPosition([x, y], prefab, prefabDesc, nodes);
+  const { facilityPoints, facilities } = getFacilitiesAndPoints(prefabDesc, tx);
+
+  const closestPfnUid = pfns.sort((a, b) => {
+    const minDistA = Math.min(...facilityPoints.map(fp => distance(fp, a)));
+    const minDistB = Math.min(...facilityPoints.map(fp => distance(fp, b)));
+    return minDistA - minDistB;
+  })[0].uid;
+  return {
+    key: closestPfnUid,
+    value: {
+      facilities,
+      itemUid: prefab.uid,
+      itemType: ItemType.Prefab,
+      description: toServiceAreaDescription(
+        prefabDesc as WithPath<PrefabDescription>,
+      ),
+    },
+  };
+}
+
+function toServiceAreaDescription({ path }: WithPath<PrefabDescription>) {
+  if (path.startsWith('prefab/gas')) {
+    if (path.includes('gallon')) {
+      return 'Gallon Oil';
+    } else if (path.includes('_hearts_')) {
+      return 'Phoenix';
+    } else if (path.includes('chemron')) {
+      return 'Aron';
+    } else if (path.includes('vortex')) {
+      return 'Vortex';
+    } else if (path.includes('wp')) {
+      return 'WP';
+    } else if (path.includes('gp')) {
+      return 'NAF';
+    } else if (path.includes('greenpetrol')) {
+      return 'GreenPetrol';
+    } else if (path.includes('fusion')) {
+      return 'Fusion';
+    } else if (path.includes('driver')) {
+      return 'Driverse';
+    } else if (path.includes('driving')) {
+      return 'Haulett';
+    }
+  } else if (path.includes('/truck_dealer/')) {
+    return toDealerLabel(path);
+  }
+
+  return '';
+}
+
+function getFacilities(prefabDesc: PrefabDescription): Set<FacilityIcon> {
+  const facilities = new Set<FacilityIcon>();
+  for (const sp of prefabDesc.spawnPoints) {
+    if (FacilitySpawnPointTypes.has(sp.type)) {
+      facilities.add(toFacilityIcon(sp.type));
+    }
+  }
+  for (const tp of prefabDesc.triggerPoints) {
+    if (tp.action === 'hud_parking') {
+      facilities.add('parking_ico');
+    }
+  }
+  return facilities;
+}
+
+function getFacilitiesAndPoints(
+  prefabDesc: PrefabDescription,
+  tx: ({ x, y }: { x: number; y: number }) => [number, number],
+): { facilities: Set<FacilityIcon>; facilityPoints: Position[] } {
+  const facilities = new Set<FacilityIcon>();
+  const facilityPoints: Position[] = [];
+  for (const sp of prefabDesc.spawnPoints) {
+    if (FacilitySpawnPointTypes.has(sp.type)) {
+      facilities.add(toFacilityIcon(sp.type));
+      facilityPoints.push(tx(sp));
+    }
+  }
+  for (const tp of prefabDesc.triggerPoints) {
+    if (tp.action === 'hud_parking') {
+      facilities.add('parking_ico');
+      facilityPoints.push(tx(tp));
+    }
+  }
+  return { facilities, facilityPoints };
+}
+
+function largestFirstComparator(a: Extent, b: Extent) {
+  const [aMinX, aMinY, aMaxX, aMaxY] = a;
+  const [bMinX, bMinY, bMaxX, bMaxY] = b;
+  const widthA = aMaxX - aMinX;
+  const heightA = aMaxY - aMinY;
+  const widthB = bMaxX - bMinX;
+  const heightB = bMaxY - bMinY;
+  return widthB * heightB - widthA * heightA;
+}
+
+function calculateDurationSeconds(
+  speedMph: number,
+  distanceMeters: number,
+): number {
+  const metersPerSecond = speedMph * 0.44704;
+  return distanceMeters / metersPerSecond;
+}

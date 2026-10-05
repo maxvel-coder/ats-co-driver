@@ -1,0 +1,42 @@
+{
+  "extends": "./tsconfig.base.json",
+  "references": [
+    {
+      "path": "packages/apis/navigation"
+    },
+    {
+      "path": "packages/apps/demo"
+    },
+    {
+      "path": "packages/apps/navigator"
+    },
+    {
+      "path": "packages/apps/prefabs"
+    },
+    {
+      "path": "packages/clis/generator"
+    },
+    {
+      "path": "packages/clis/parser"
+    },
+    {
+      "path": "packages/clis/navigator"
+    },
+    {
+      "path": "packages/guis/navigator"
+    },
+    {
+      "path": "packages/libs/base"
+    },
+    {
+      "path": "packages/libs/map"
+    },
+    {
+      "path": "packages/libs/ui"
+    },
+    {
+      "path": "packages/libs/io"
+    }
+  ],
+  "files": []
+}

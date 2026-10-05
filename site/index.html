@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATS Co-Driver: free tablet GPS &amp; dashboard for American Truck Simulator</title>
+<meta name="description" content="Turn your tablet or phone into a real truck GPS and dashboard for American Truck Simulator: turn-by-turn voice navigation with lanes, multi-stop routes, fuel / rest / mechanic suggestions, delivery timing, live gauges and one-tap controls. Free and open source.">
+<meta name="keywords" content="American Truck Simulator, ATS, tablet GPS, second screen, dashboard, telemetry, navigation, route advisor, ATS mod, truck sim companion app">
+<meta property="og:title" content="ATS Co-Driver: free tablet GPS & dashboard for American Truck Simulator">
+<meta property="og:description" content="Your tablet becomes the GPS and dashboard of your truck. Voice directions, lanes, smart stops, delivery timing. Free.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="assets/og.png">
+<meta name="theme-color" content="#06080b">
+<link rel="icon" href="assets/icon.svg">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css">
+<link rel="stylesheet" href="scenes.css">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"ATS Co-Driver","applicationCategory":"GameApplication","operatingSystem":"Windows 10, Windows 11","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"description":"Free tablet GPS and dashboard for American Truck Simulator."}
+</script>
+</head>
+<body>
+
+<header class="nav">
+  <a class="brand" href="#top"><img src="assets/icon.svg" alt=""> ATS <b>Co-Driver</b></a>
+  <nav>
+    <a href="#features">Features</a>
+    <a href="#how">How it works</a>
+    <a href="#faq">FAQ</a>
+    <a class="coffee-sm" data-track="coffee" href="BUY_ME_A_COFFEE_URL" target="_blank" rel="noopener">☕ Support</a>
+    <a class="btn btn-sm" href="#download">Download free</a>
+  </nav>
+</header>
+
+<main id="top">
+  <!-- ============================================================ hero -->
+  <section class="hero">
+    <div class="hero-text">
+      <p class="eyebrow">Free · open source · for American Truck Simulator</p>
+      <h1>Your tablet becomes the <span class="grad">GPS and dashboard</span> of your truck.</h1>
+      <p class="lead">Turn-by-turn voice directions with lanes, routes with as many stops as you like, smart fuel, rest and mechanic stops, delivery timing that knows your window, and the switches of your cab, one tap away.</p>
+      <div class="cta">
+        <a class="btn" href="#download">⬇ Download for Windows</a>
+        <a class="btn ghost" href="#features">See what it does</a>
+      </div>
+      <p class="fine">Windows 10/11 · ATS on Steam · any phone or tablet with a browser · no account, no ads</p>
+      <ul class="hl">
+        <li><i class="c-blue"><svg viewBox="0 0 24 24"><path d="M3 10v4h3l8 5V5L6 10z"/><path d="M17 9a4 4 0 0 1 0 6M19.5 6.5a8 8 0 0 1 0 11"/></svg></i><b>Voice</b><span>in time to react</span></li>
+        <li><i class="c-green"><svg viewBox="0 0 24 24"><path d="M6 21V11l-3-3M6 11l3-3M12 21V4M15 7l-3-3-3 3M18 21v-9l3-3"/></svg></i><b>Lanes</b><span>before the junction</span></li>
+        <li><i class="c-amber"><svg viewBox="0 0 24 24"><path d="M4 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M3 21h12M6.5 8h5"/><path d="M14 11h2a2 2 0 0 1 2 2v3.5a1.5 1.5 0 0 0 3 0V8l-3-3"/></svg></i><b>Smart stops</b><span>least detour</span></li>
+        <li><i class="c-teal"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/></svg></i><b>On time</b><span>window &amp; deadline</span></li>
+        <li><i class="c-purple"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg></i><b>Controls</b><span>one tap away</span></li>
+      </ul>
+    </div>
+    <div class="hero-device">
+      <div class="tablet"><div class="screen" id="scene-hero"></div></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ features -->
+  <section id="features" class="features">
+    <h2>Everything a co-driver does, on a second screen</h2>
+    <p class="sub">Every animation below is the real app, simulated, so you can see what happens while you drive.</p>
+
+    <article class="feature">
+      <div class="f-text">
+        <span class="tag">Navigation</span>
+        <h3>Zooms in before every junction, and shows your lane</h3>
+        <p>Far out on the highway so you see the road ahead, gently closer when an exit or a busy interchange comes up, timed by your speed, so there is always time to react. Lane arrows show exactly which lanes lead your way.</p>
+        <ul class="ticks"><li>Speed-based zoom and tilt, map always turns with your truck</li><li>Lane guidance from the game's own road data</li><li>Only the states you own, routes never go through DLC you don't have</li></ul>
+      </div>
+      <div class="f-demo"><div class="tablet sm"><div class="screen" id="scene-junction"></div></div></div>
+    </article>
+
+    <article class="feature rev">
+      <div class="f-text">
+        <span class="tag">Voice</span>
+        <h3>A calm voice that tells you once, not every 500 feet</h3>
+        <p>On the highway: one heads-up about a mile before, one right before the turn. In town: one call. Through your PC headset, mixed with the game sound, or from the tablet speaker.</p>
+        <ul class="ticks"><li>Natural offline voice (Piper “Amy”), no internet while driving</li><li>“…then turn left” when two turns come close together</li><li>Stops reached, arrivals and suggestions spoken too</li></ul>
+      </div>
+      <div class="f-demo"><div class="tablet sm"><div class="screen" id="scene-voice"></div></div></div>
+    </article>
+
+    <article class="feature">
+      <div class="f-text">
+        <span class="tag">Routes</span>
+        <h3>As many stops as you like, always in the best order</h3>
+        <p>Long-press the map to add a stop. Co-Driver sorts them for the shortest trip and still ends at your delivery, add a point closer than stop 1 and it simply becomes the new 1. Hold a pin to remove it.</p>
+        <ul class="ticks"><li>Numbered pins, the delivery always last</li><li>“Replace route” when you want to go only there</li><li>No points picked? It always guides you to your job</li></ul>
+      </div>
+      <div class="f-demo"><div class="tablet sm"><div class="screen" id="scene-stops"></div></div></div>
+    </article>
+
+    <article class="feature rev">
+      <div class="f-text">
+        <span class="tag">Smart stops</span>
+        <h3>Fuel, rest or a mechanic: the one with the least detour</h3>
+        <p>Low on fuel, rest timer running out or the truck damaged? Co-Driver checks the stations along your route, routes the best few for real and suggests the one that costs the fewest minutes. One big tap adds it to your route.</p>
+        <ul class="ticks"><li>Fuel only from stations you can still reach</li><li>Rest stops before your timer runs out</li><li>Mechanic when damage passes your limit (10 % by default)</li></ul>
+      </div>
+      <div class="f-demo"><div class="tablet sm"><div class="screen" id="scene-suggest"></div></div></div>
+    </article>
+
+    <article class="feature">
+      <div class="f-text">
+        <span class="tag">Deliveries</span>
+        <h3>Know you'll be on time before you're late</h3>
+        <p>One card for the whole job: cargo and pay, a timeline from now to the deadline with your delivery window, your real arrival including stops and traffic lights, and the cargo damage. In the time zone of the destination.</p>
+        <ul class="ticks"><li>“Too early” warnings for delivery windows</li><li>How long you can rest and still arrive on time</li><li>Progress bar for the whole trip</li></ul>
+      </div>
+      <div class="f-demo"><div class="tablet sm"><div class="screen" id="scene-delivery"></div></div></div>
+    </article>
+
+    <article class="feature rev">
+      <div class="f-text">
+        <span class="tag">One tap</span>
+        <h3>Deliver, refuel to full or sleep without the keyboard</h3>
+        <p>Stop at a pump, a garage, your delivery spot or a parking lot and a big button appears. One tap fills the tank completely, turns the engine off when the game needs it, or presses Enter for you.</p>
+        <ul class="ticks"><li>Exact spots from the game's own map</li><li>Smart engine button: electrics → starter → running</li><li>Lights, wipers, hazards, cruise, radio, windows, horn…</li></ul>
+      </div>
+      <div class="f-demo"><div class="tablet sm"><div class="screen" id="scene-enter"></div></div></div>
+    </article>
+
+    <article class="feature">
+      <div class="f-text">
+        <span class="tag">Your cab</span>
+        <h3>Build your own dashboard</h3>
+        <p>Speedometer, rev ring with gear, fuel range, rest timer, warning lights, damage, clock, cards and switches, drag what you want where you want it. Day and night themes, phone or tablet, portrait or landscape: each keeps its own layout.</p>
+        <ul class="ticks"><li>40+ widgets, drag &amp; drop</li><li>Real warning-light colours, blinking indicators</li><li>Big targets, made to be tapped while driving</li></ul>
+      </div>
+      <div class="f-demo"><div class="tablet sm"><div class="screen" id="scene-custom"></div></div></div>
+    </article>
+  </section>
+
+  <!-- ============================================================ shots -->
+  <section class="shots">
+    <h2>The real thing</h2>
+    <div class="shot-row">
+      <figure><img src="assets/shot-tablet.png" alt="ATS Co-Driver on a tablet: map, gauges, delivery card and switches" loading="lazy"><figcaption>Tablet, night theme</figcaption></figure>
+      <figure><img src="assets/shot-phone.png" alt="ATS Co-Driver on a phone in portrait" loading="lazy"><figcaption>Phone, portrait</figcaption></figure>
+      <figure><img src="assets/shot-day.png" alt="ATS Co-Driver in the day theme" loading="lazy"><figcaption>Day theme</figcaption></figure>
+    </div>
+  </section>
+
+  <!-- ============================================================ how -->
+  <section id="how" class="how">
+    <h2>Ready in three steps</h2>
+    <ol class="steps">
+      <li><span class="num">1</span><h3>Install on your PC</h3><p>Run the installer. It finds American Truck Simulator through Steam and adds the small game plugin.</p></li>
+      <li><span class="num">2</span><h3>Start Co-Driver</h3><p>The first start builds the map from <i>your own</i> game files (a few minutes, once) and downloads the voice.</p></li>
+      <li><span class="num">3</span><h3>Scan the code</h3><p>Point your phone or tablet at the QR code. No camera? Type the address shown. “Add to Home screen” and it opens like an app.</p></li>
+    </ol>
+  </section>
+
+  <!-- ============================================================ download -->
+  <section id="download" class="download">
+    <div class="dl-card">
+      <h2>Download ATS Co-Driver</h2>
+      <p>Free forever. No account, no ads, no tracking, everything runs on your PC and your home Wi-Fi.</p>
+      <a class="btn big" data-track="download" href="https://github.com/maxvel-coder/ats-co-driver/releases/latest">⬇ Download for Windows <small>(installer, 34 MB)</small></a>
+      <p class="fine">Windows may show “unknown publisher” for new free tools: click <b>More info → Run anyway</b>.</p>
+      <div class="req">
+        <div><b>PC</b><span>Windows 10/11, 8 GB RAM</span></div>
+        <div><b>Game</b><span>American Truck Simulator on Steam (any DLC)</span></div>
+        <div><b>Screen</b><span>Any phone or tablet with a browser, same Wi-Fi</span></div>
+      </div>
+    </div>
+    <div class="coffee-card">
+      <div class="cup">☕</div>
+      <h3>Enjoying the drive?</h3>
+      <p>Co-Driver is made in free time and given away for free. If it makes your trips better, a coffee helps me keep it updated for new game versions, and build the next project.</p>
+      <a class="btn coffee" data-track="coffee" href="BUY_ME_A_COFFEE_URL" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+    </div>
+  </section>
+
+  <!-- ============================================================ faq -->
+  <section id="faq" class="faq">
+    <h2>Questions</h2>
+    <details><summary>Is it really free?</summary><p>Yes. Co-Driver is open source under the GNU GPL v3, free to use, share and improve. Donations are welcome but never required.</p></details>
+    <details><summary>Does it change my game or my save?</summary><p>No. It adds one small telemetry plugin to the game folder, the official way SCS offers for dashboards. Your saves are never touched. Uninstalling removes the plugin.</p></details>
+    <details><summary>Why does the first start take a few minutes?</summary><p>Co-Driver builds its map from your own copy of the game (we can't ship SCS's map data). That happens once, and again automatically after game updates or when you buy a new map DLC.</p></details>
+    <details><summary>Do I need all the DLCs?</summary><p>No. Co-Driver reads which map DLCs your game actually loads and only shows, and routes through, the states you own.</p></details>
+    <details><summary>Can I keep using the in-game GPS?</summary><p>Yes. On a plain delivery both guide to the same place. When you add your own stops, turn the game's navigation voice off so you don't hear two voices.</p></details>
+    <details><summary>My tablet has no camera.</summary><p>The PC shows the address (like <code>http://192.168.1.20:8080</code>). Type it into the tablet's browser, with <code>http://</code> and <code>:8080</code>, while it's on the same Wi-Fi.</p></details>
+    <details><summary>Euro Truck Simulator 2?</summary><p>Not yet, Co-Driver is built for American Truck Simulator for now.</p></details>
+  </section>
+</main>
+
+<footer>
+  <p><b>ATS Co-Driver</b> · free and open source (GPL-3.0) · <a data-track="source" href="https://github.com/maxvel-coder/ats-co-driver">Source code</a> · <a data-track="coffee" href="BUY_ME_A_COFFEE_URL" target="_blank" rel="noopener">Buy me a coffee</a></p>
+  <p class="fine">Not affiliated with or endorsed by SCS Software. American Truck Simulator is a trademark of SCS Software. Built on
+    <a href="https://github.com/truckermudgeon/maps">truckermudgeon/maps</a>, <a href="https://maplibre.org">MapLibre</a> and
+    <a href="https://github.com/rhasspy/piper">Piper</a>. The animations are the app's own map and screens, simulated on real
+    routes; map pieces are drawn from American Truck Simulator's map data (© SCS Software).</p>
+</footer>
+
+<!-- visitor + click counting (GoatCounter, no cookies): put your GoatCounter code here -->
+<script>window.CODRIVER_GOATCOUNTER = 'maxvel463';</script>
+<script src="analytics.js" defer></script>
+<script src="vendor/maplibre/maplibre-gl.js" defer></script>
+<script src="scenes.js" defer></script>
+</body>
+</html>

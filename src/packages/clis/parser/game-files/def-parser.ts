@@ -1,0 +1,1104 @@
+import { assert, assertExists } from '@truckermudgeon/base/assert';
+import type { Extent } from '@truckermudgeon/base/geom';
+import { Preconditions } from '@truckermudgeon/base/precon';
+import {
+  AtsScsSourceToDlcGuard,
+  Ets2ScsSourceToDlcGuard,
+  isLaneSpeedClass,
+} from '@truckermudgeon/map/constants';
+import type {
+  Achievement,
+  Cargo,
+  City,
+  Company,
+  Country,
+  Ferry,
+  FerryConnection,
+  LaneSpeedClass,
+  MileageTarget,
+  ModelDescription,
+  PrefabDescription,
+  RoadLook,
+  Route,
+  SignDescription,
+  SpeedLimits,
+  WithPath,
+} from '@truckermudgeon/map/types';
+import type { JSONSchemaType } from 'ajv';
+import { logger } from '../logger';
+import { convertSiiToJson } from './convert-sii-to-json';
+import { parseModelPmg } from './model-pmg-parser';
+import { parsePrefabPpd } from './prefab-ppd-parser';
+import type { Entries } from './scs-archive';
+import { parseSii } from './sii-parser';
+import type {
+  AchievementsSii,
+  CargoDataSii,
+  CitySii,
+  CompanySii,
+  CountrySii,
+  FerrySii,
+  MileageTargetsSii,
+  ModelSii,
+  OversizeOfferSii,
+  PrefabSii,
+  RoadLookSii,
+  RouteSii,
+  SignSii,
+  SpeedLimitsSii,
+} from './sii-schemas';
+import {
+  AchievementsSiiSchema,
+  CargoDataSiiSchema,
+  CargoDefSiiSchema,
+  CityCompanySiiSchema,
+  CitySiiSchema,
+  CompanySiiSchema,
+  CountrySiiSchema,
+  FerryConnectionSiiSchema,
+  FerrySiiSchema,
+  MileageTargetsSiiSchema,
+  ModelSiiSchema,
+  OversizeOfferSiiSchema,
+  PrefabSiiSchema,
+  RoadLookSiiSchema,
+  RouteSiiSchema,
+  SignSiiSchema,
+  SpeedLimitSiiSchema,
+  ViewpointsSiiSchema,
+} from './sii-schemas';
+import { includeDirectiveCollector } from './sii-visitors';
+
+export function parseDefFiles(entries: Entries, application: 'ats' | 'eut2') {
+  logger.log(
+    'parsing',
+    application,
+    'def, prefab .ppd, and model .pmg files...',
+  );
+  const def = Preconditions.checkExists(entries.directories.get('def'));
+
+  const cities = new Map<
+    string,
+    Omit<City, 'x' | 'y' | 'areas' | 'companies'>
+  >();
+  const countries = new Map<string, Country>();
+  const companies = new Map<string, Company>();
+  const cargoes = new Map<string, Cargo>();
+  const ferries = new Map<
+    string,
+    Omit<Ferry, 'nodeUid' | 'x' | 'y' | 'connections' | 'train'> & {
+      connections: Omit<
+        FerryConnection,
+        'nodeUid' | 'x' | 'y' | 'name' | 'nameLocalized'
+      >[];
+    }
+  >();
+
+  const processAndAdd = <T extends object, U extends { token: string }>(
+    path: string,
+    dlcGuard: number,
+    schema: JSONSchemaType<T>,
+    p: (t: T, e: Entries) => U | undefined,
+    m: Map<string, U & { dlcGuard: number }>,
+  ) => {
+    const t = convertSiiToJson(path, entries, schema);
+    const u = p(t, entries);
+    if (u) {
+      m.set(u.token, { ...u, dlcGuard });
+    }
+  };
+
+  for (const f of def.files) {
+    if (
+      !/^(city|country|company|cargo|ferry)\./.test(f) ||
+      !f.endsWith('.sii')
+    ) {
+      continue;
+    }
+    if (/\b(?:xmas2023|mod_halloween_2025_event)\b/.test(f)) {
+      continue; // skip Winterland, Halloween community events
+    }
+    const dlc = /dlc_[^.]+/.exec(f)?.[0] ?? '';
+    let dlcGuard: number | undefined =
+      dlc === ''
+        ? 0
+        : application === 'ats'
+          ? AtsScsSourceToDlcGuard[dlc + '.scs']
+          : Ets2ScsSourceToDlcGuard[dlc + '.scs'];
+    if (dlcGuard == null) {
+      logger.warn(`unknown dlc guard for ${dlc} (${f}); falling back to 0`);
+      dlcGuard = 0;
+    }
+
+    const includePaths = parseIncludeOnlySii(`def/${f}`, entries);
+    for (const path of includePaths) {
+      if (f.startsWith('city.')) {
+        processAndAdd(path, dlcGuard, CitySiiSchema, processCityJson, cities);
+      } else if (f.startsWith('country.')) {
+        const partialCountry = processCountryJson(
+          convertSiiToJson(path, entries, CountrySiiSchema),
+        );
+        if (partialCountry) {
+          const truckSpeedLimits = processSpeedLimitJson(
+            convertSiiToJson(
+              path.replace('.sui', '/speed_limits.sii'),
+              entries,
+              SpeedLimitSiiSchema,
+            ),
+          );
+          countries.set(partialCountry.token, {
+            ...partialCountry,
+            truckSpeedLimits,
+          });
+        }
+      } else if (f.startsWith('company.')) {
+        processAndAdd(
+          path,
+          dlcGuard,
+          CompanySiiSchema,
+          processCompanyJson,
+          companies,
+        );
+      } else if (f.startsWith('cargo.')) {
+        processAndAdd(
+          path,
+          dlcGuard,
+          CargoDataSiiSchema,
+          processCargoJson,
+          cargoes,
+        );
+      } else if (f.startsWith('ferry.')) {
+        processAndAdd(
+          path,
+          dlcGuard,
+          FerrySiiSchema,
+          processFerryJson,
+          ferries,
+        );
+      } else {
+        throw new Error();
+      }
+    }
+  }
+  logger.info('parsed', cities.size, 'cities');
+  logger.info('parsed', countries.size, 'states/countries');
+  logger.info('parsed', companies.size, 'companies');
+  logger.info('parsed', cargoes.size, 'cargoes');
+  logger.info('parsed', ferries.size, 'ferry/train terminals');
+
+  const defCompany = Preconditions.checkExists(
+    entries.directories.get('def/company'),
+  );
+  for (const token of defCompany.subdirectories) {
+    if (companies.has(token)) {
+      continue;
+    }
+    const companyDefaults = {
+      token,
+      // TODO truck dealers _do_ have city tokens, found within the `editor` subdirectories.
+      cityTokens: [],
+      cargoInTokens: [],
+      cargoOutTokens: [],
+      dlcGuard: 0,
+    };
+    if (token.startsWith('pt_trk_')) {
+      companies.set(token, {
+        ...companyDefaults,
+        name: 'Peterbilt',
+      });
+    } else if (token.startsWith('kw_trk_')) {
+      companies.set(token, {
+        ...companyDefaults,
+        name: 'Kenworth',
+      });
+    } else if (token.startsWith('ws_trk_')) {
+      companies.set(token, {
+        ...companyDefaults,
+        name: 'Western Star',
+      });
+    } else {
+      logger.warn(token, 'has no company info');
+    }
+  }
+
+  const defWorld = Preconditions.checkExists(
+    entries.directories.get('def/world'),
+  );
+  const prefabs = new Map<string, WithPath<PrefabDescription>>();
+  const roadLooks = new Map<string, RoadLook>();
+  const signs = new Map<string, SignDescription>();
+  const models = new Map<string, ModelDescription>();
+  const vegetation = new Set<string>();
+  for (const f of defWorld.files) {
+    if (!/^(prefab|road_look|sign|model)\./.test(f) || !f.endsWith('.sii')) {
+      continue;
+    }
+
+    if (f.startsWith('prefab.')) {
+      const json = convertSiiToJson(`def/world/${f}`, entries, PrefabSiiSchema);
+      processPrefabJson(json, entries).forEach((v, k) => prefabs.set(k, v));
+    } else if (f.startsWith('model')) {
+      const json = convertSiiToJson(`def/world/${f}`, entries, ModelSiiSchema);
+      const { buildings, vegetation: _vegetation } = processModelJson(
+        json,
+        entries,
+      );
+      buildings.forEach((v, k) => models.set(k, v));
+      _vegetation.forEach(v => vegetation.add(v));
+    } else if (f.startsWith('sign')) {
+      const json = convertSiiToJson(`def/world/${f}`, entries, SignSiiSchema);
+      processSignJson(json).forEach((v, k) => signs.set(k, v));
+    } else if (f.startsWith('road_look.')) {
+      const json = convertSiiToJson(
+        `def/world/${f}`,
+        entries,
+        RoadLookSiiSchema,
+      );
+      processRoadLookJson(json).forEach((v, k) => roadLooks.set(k, v));
+    } else {
+      throw new Error();
+    }
+  }
+  logger.info('parsed', prefabs.size, 'prefab defs');
+  logger.info('parsed', roadLooks.size, 'road looks');
+  logger.info('parsed', signs.size, 'editable sign defs');
+  logger.info('parsed', models.size, 'building models');
+  logger.info('parsed', vegetation.size, 'vegetation models');
+
+  const mileageTargets: Map<string, MileageTarget> = processMileageTargetJson(
+    convertSiiToJson(
+      'def/sign/mileage_targets.sii',
+      entries,
+      MileageTargetsSiiSchema,
+    ),
+  );
+  logger.info('parsed', mileageTargets.size, 'mileage targets');
+
+  const defPhotoAlbum = Preconditions.checkExists(
+    entries.directories.get('def/photo_album'),
+  );
+  const viewpoints = new Map<bigint, string>(); // item.uid to l10n token
+  let itemCount = 0;
+  for (const f of defPhotoAlbum.files) {
+    if (!/^(viewpoints|landmarks)\.sui$/.test(f)) {
+      continue;
+    }
+    const json = convertSiiToJson(
+      `def/photo_album/${f}`,
+      entries,
+      ViewpointsSiiSchema,
+    );
+    const items = json.photoAlbumItem;
+    for (const val of Object.values(items)) {
+      itemCount++;
+      for (const uid of val.objectsUid) {
+        const token = val.name.replace(/(^@@)|(@@$)/g, '');
+        viewpoints.set(uid, token);
+      }
+    }
+  }
+  logger.info('parsed', itemCount, 'viewpoints and photo trophies');
+
+  const achievements = new Map<string, Achievement>();
+  for (const f of def.files) {
+    if (/^achievements\.(\w+\.)?sii$/.test(f)) {
+      const json = convertSiiToJson(`def/${f}`, entries, AchievementsSiiSchema);
+      processAchievementsJson(json).forEach((v, k) => achievements.set(k, v));
+    }
+  }
+  logger.info('parsed', achievements.size, 'achievements');
+
+  const routes = new Map<string, Route>();
+  if (def.files.includes('oversize_offer_data.sii')) {
+    const oversizeOfferData = convertSiiToJson(
+      'def/oversize_offer_data.sii',
+      entries,
+      OversizeOfferSiiSchema,
+    );
+    for (const f of def.files) {
+      if (/^route\.(\w+\.)?sii$/.test(f)) {
+        processRouteJson(
+          convertSiiToJson('def/route.sii', entries, RouteSiiSchema),
+          oversizeOfferData,
+        ).forEach((v, k) => routes.set(k, v));
+      }
+    }
+    logger.info('parsed', routes.size, 'special transport routes');
+  } else {
+    logger.info('skipping parsing of special transport routes');
+  }
+
+  return {
+    achievements,
+    routes,
+    cities,
+    countries,
+    companies,
+    cargoes,
+    ferries,
+    prefabs,
+    roadLooks,
+    models,
+    signs,
+    vegetation,
+    mileageTargets,
+    viewpoints,
+  };
+}
+
+function parseIncludeOnlySii(siiPath: string, entries: Entries): string[] {
+  logger.debug('parsing', siiPath, 'for @include directives');
+  const f = Preconditions.checkExists(entries.files.get(siiPath));
+  const res = parseSii(f.read().toString());
+  if (!res.ok) {
+    logger.error('error parsing', siiPath);
+    throw new Error();
+  }
+
+  return includeDirectiveCollector.collect(res.cst, 'def');
+}
+
+function processCityJson(obj: CitySii) {
+  if (!obj.cityData) {
+    return;
+  }
+  const entries = Object.entries(obj.cityData);
+  if (entries.length !== 1) {
+    throw new Error();
+  }
+  const [token, rawCity] = entries[0];
+  return {
+    token: token.split('.')[1],
+    name: rawCity.cityName,
+    nameLocalized: rawCity.cityNameLocalized,
+    countryToken: rawCity.country,
+    population: rawCity.population ?? 0,
+  };
+}
+
+function processCountryJson(obj: CountrySii) {
+  if (!obj.countryData) {
+    return;
+  }
+  const entries = Object.entries(obj.countryData);
+  if (entries.length !== 1) {
+    throw new Error();
+  }
+  const [token, rawCountry] = entries[0];
+  return {
+    token: token.split('.')[2],
+    name: rawCountry.name,
+    nameLocalized: rawCountry.nameLocalized,
+    id: rawCountry.countryId,
+    x: rawCountry.pos[0],
+    y: rawCountry.pos[2],
+    code: rawCountry.countryCode,
+    fuelPrice: rawCountry.fuelPrice,
+    timeZone: rawCountry.timeZone,
+    timeZoneName: rawCountry.timeZoneName,
+    secondaryTimeZones:
+      rawCountry.secondaryTimeZoneArea?.map((area, i) => {
+        const [minX, maxX, minY, maxY] = area;
+        return {
+          extent: [minX, minY, maxX, maxY] as Extent,
+          timeZone: rawCountry.secondaryTimeZone![i],
+        };
+      }) ?? [],
+  };
+}
+
+function toLaneSpeedClass(str: string): LaneSpeedClass {
+  const lsc = str.replace(/(_[a-z0-9])/g, g => g.substring(1).toUpperCase());
+  assert(isLaneSpeedClass(lsc));
+  return lsc;
+}
+
+function processSpeedLimitJson(obj: SpeedLimitsSii) {
+  const { laneSpeedClass, limit, maxLimit, urbanLimit } =
+    obj.countrySpeedLimit['.speed_limit.truck'];
+
+  // ATS 1.61 ships some countries whose limit arrays are shorter than the lane
+  // speed class list; fall back to the last known value instead of aborting.
+  if (
+    ![limit, maxLimit, urbanLimit].every(
+      array => array.length === laneSpeedClass.length,
+    )
+  ) {
+    console.warn(
+      `speed limit array length mismatch (${laneSpeedClass.length} classes; ` +
+        `${limit.length}/${maxLimit.length}/${urbanLimit.length} values); padding`,
+    );
+  }
+  const at = (array: number[], index: number) =>
+    array[Math.min(index, array.length - 1)];
+
+  return laneSpeedClass.reduce((obj, className, index) => {
+    obj[toLaneSpeedClass(className)] = {
+      limit: at(limit, index),
+      maxLimit: at(maxLimit, index),
+      urbanLimit: at(urbanLimit, index),
+    };
+    return obj;
+  }, {} as SpeedLimits);
+}
+
+function processCompanyJson(
+  obj: CompanySii,
+  entries: Entries,
+): Omit<Company, 'dlcGuard'> {
+  const objEntries = Object.entries(obj.companyPermanent);
+  const [token, rawCompany] = objEntries[0];
+  const companyToken = token.split('.')[2];
+  const cityTokens: string[] = [];
+  const cargoInTokens: string[] = [];
+  const cargoOutTokens: string[] = [];
+  const editorFolder = entries.directories.get(
+    `def/company/${companyToken}/editor`,
+  );
+  if (editorFolder) {
+    for (const f of editorFolder.files) {
+      const city = convertSiiToJson(
+        `def/company/${companyToken}/editor/${f}`,
+        entries,
+        CityCompanySiiSchema,
+      );
+      for (const [, entry] of Object.entries(city.companyDef)) {
+        cityTokens.push(entry.city);
+      }
+    }
+  }
+  for (const direction of ['in', 'out']) {
+    const directionFolder = entries.directories.get(
+      `def/company/${companyToken}/${direction}`,
+    );
+    if (directionFolder) {
+      const arr = direction === 'in' ? cargoInTokens : cargoOutTokens;
+      for (const f of directionFolder.files) {
+        const cargo = convertSiiToJson(
+          `def/company/${companyToken}/${direction}/${f}`,
+          entries,
+          CargoDefSiiSchema,
+        );
+        for (const [, entry] of Object.entries(cargo.cargoDef)) {
+          arr.push(entry.cargo);
+        }
+      }
+    }
+  }
+
+  return {
+    token: companyToken,
+    name: rawCompany.name,
+    cityTokens,
+    cargoInTokens,
+    cargoOutTokens,
+  };
+}
+
+function processCargoJson(obj: CargoDataSii): Omit<Cargo, 'dlcGuard'> {
+  const objEntries = Object.entries(obj.cargoData);
+  const [tokenPath, rawCargo] = objEntries[0];
+  const token = tokenPath.split('.')[1];
+  return {
+    token,
+    ...rawCargo,
+    name: rawCargo.name.replaceAll('@', '').replaceAll('_', ' '),
+    nameLocalized: rawCargo.name.startsWith('@@') ? rawCargo.name : undefined,
+    fragility: rawCargo.fragility ?? 0,
+    overweight: rawCargo.overweight === 'true' ? true : undefined,
+    valuable: rawCargo.valuable === 'true' ? true : undefined,
+    unitLoadTime: rawCargo.unitLoadTime ?? 0,
+  };
+}
+
+function processFerryJson(obj: FerrySii, entries: Entries) {
+  const objEntries = Object.entries(obj.ferryData);
+  const [tokenPath, rawFerry] = objEntries[0];
+  const token = tokenPath.split('.')[1];
+  const defFerryConnection = Preconditions.checkExists(
+    entries.directories.get('def/ferry/connection'),
+  );
+  const connections: Omit<
+    FerryConnection,
+    'nodeUid' | 'x' | 'y' | 'name' | 'nameLocalized'
+  >[] = [];
+
+  // find matching connection file for `token`.
+  // do this because file names don't always match up with ferry tokens (i'm looking at you, travemunde_p).
+  // this is A LOT of repeated work.
+  // TODO read every file in the def/ferry/connections folder once, then match things up based on tokens.
+  for (const f of defFerryConnection.files) {
+    const dlc = /dlc_[^.]+/.exec(f)?.[0] ?? '';
+    let dlcGuard: number | undefined =
+      dlc === ''
+        ? 0
+        : (AtsScsSourceToDlcGuard[dlc + '.scs'] ??
+          Ets2ScsSourceToDlcGuard[dlc + '.scs']);
+    if (dlcGuard == null) {
+      logger.warn(`unknown dlc guard for ${dlc} (${f}); falling back to 0`);
+      dlcGuard = 0;
+    }
+    const json = convertSiiToJson(
+      `def/ferry/connection/${f}`,
+      entries,
+      FerryConnectionSiiSchema,
+    );
+    const ferryConnection = json.ferryConnection;
+    const key = Object.keys(ferryConnection)[0];
+    // key is expected to be in form: "conn.source_token.dest_token"
+    const [, start, end] = key.split('.');
+    if (start !== token) {
+      continue;
+    }
+
+    const connection = ferryConnection[key];
+    const { connectionPositions = [], connectionDirections = [] } = connection;
+    if (connectionPositions.length !== connectionDirections.length) {
+      logger.warn(`position/directions mismatch for ${f}. skipping.`);
+      continue;
+    }
+
+    const intermediatePoints: { x: number; y: number; rotation: number }[] = [];
+    for (let i = 0; i < connectionPositions.length; i++) {
+      intermediatePoints.push({
+        x: connectionPositions[i][0] / 256,
+        y: connectionPositions[i][2] / 256,
+        rotation: Math.atan2(
+          connectionDirections[i][2],
+          connectionDirections[i][0],
+        ),
+      });
+    }
+
+    connections.push({
+      token: end,
+      price: connection.price,
+      time: connection.time,
+      distance: connection.distance,
+      intermediatePoints,
+      dlcGuard,
+    });
+  }
+
+  return {
+    token,
+    name: rawFerry.ferryName,
+    nameLocalized: rawFerry.ferryNameLocalized,
+    connections,
+  };
+}
+
+function processPrefabJson(
+  obj: PrefabSii,
+  entries: Entries,
+): Map<string, WithPath<PrefabDescription>> {
+  const prefabModel = obj.prefabModel;
+  if (!prefabModel) {
+    return new Map();
+  }
+
+  const prefabTuples = Object.entries(prefabModel).map(
+    ([key, o]) =>
+      [key.split('.')[1], o.prefabDesc.substring(1)] as [string, string],
+  );
+  const prefabs = new Map<string, PrefabDescription & { path: string }>();
+  for (const [token, path] of prefabTuples) {
+    const ppdFile = entries.files.get(path);
+    if (!ppdFile) {
+      logger.warn(`could not find prefab file for ${token}`);
+      continue;
+    }
+    const ppd = parsePrefabPpd(ppdFile.read());
+    if (ppd.mapPoints.some(p => p.type === 'polygon')) {
+      // TODO figure out a way to get building footprint information for
+      //  polygons in prefabs that look like buildings.
+
+      // Looks like there are spawn/no-spawn variants of prefabs that
+      // reference the same pmg. Strip out the "_spawn" suffix when searching
+      // for the associated pmg.
+      const pmgPath = path.replace(
+        /(_spawn|_roof_trigger_rt|_rt|_trigger)?\.ppd$/,
+        '.pmg',
+      );
+      const pmgFile = entries.files.get(pmgPath);
+      if (!pmgFile) {
+        logger.warn(
+          `could not find pmg file ${pmgPath} for ${token} (${path})`,
+        );
+      } else {
+        //const pmg = parseModelPmg(pmgFile.read());
+        //if (pmg) {
+        //  //console.log(path, pmg?.height);
+        //}
+      }
+    }
+    prefabs.set(token, {
+      path,
+      ...ppd,
+    });
+    //      console.log(path);
+    //      toRoadSegmentsAndPolygons(prefabs.get(token)!);
+  }
+  return prefabs;
+}
+
+function processSignJson(obj: SignSii): Map<string, SignDescription> {
+  const signModel = obj.signModel;
+  if (!signModel) {
+    return new Map();
+  }
+
+  return new Map<string, SignDescription>(
+    Object.entries(signModel).flatMap(([key, o]) => {
+      return [
+        [
+          // keys look like "sign.foo"; we just want the "foo".
+          key.split('.')[1],
+          {
+            name: o.modelDesc
+              .split('/')
+              .at(-1)!
+              .slice(0, -4)
+              .replaceAll('_', ' '),
+            modelDesc: o.modelDesc,
+            category: o.category ?? '',
+            editable: o.editable === 'true',
+          },
+        ],
+      ];
+    }),
+  );
+}
+
+function processModelJson(
+  obj: ModelSii,
+  entries: Entries,
+): {
+  buildings: Map<string, ModelDescription & { path: string }>;
+  vegetation: Set<string>;
+} {
+  const modelDef = obj.modelDef;
+  if (!modelDef) {
+    return {
+      buildings: new Map(),
+      vegetation: new Set(),
+    };
+  }
+
+  const vegetation = new Set<string>(
+    Object.entries(modelDef)
+      .filter(([, o]) => o.vegetationModel != null)
+      .map(([key]) => key.split('.')[1]),
+  );
+  const modelTuples = Object.entries(modelDef).map(
+    ([key, o]) =>
+      [key.split('.')[1], o.modelDesc?.substring(1)] as [
+        string,
+        string | undefined,
+      ],
+  );
+  const buildings = new Map<string, ModelDescription & { path: string }>();
+  for (const [token, path] of modelTuples) {
+    if (path == null) {
+      continue;
+    }
+
+    if (!path.endsWith('.pmd')) {
+      continue;
+    }
+    const isProbablyBuildingModel =
+      /^model2?\/building\//.exec(path) ??
+      /^model2?\/panorama\/.*building/.exec(path);
+    if (!isProbablyBuildingModel) {
+      continue;
+    }
+    const pmgPath = path.replace(/\.pmd$/, '.pmg');
+    const pmgFile = entries.files.get(pmgPath);
+    if (!pmgFile) {
+      // TODO parse PMD file
+      logger.warn(`could not find pmg file ${pmgPath} for ${token}`);
+      continue;
+    }
+    const pmg = parseModelPmg(pmgFile.read());
+    buildings.set(token, { path, ...pmg });
+  }
+  return { buildings, vegetation };
+}
+
+function processRoadLookJson(obj: RoadLookSii): Map<string, RoadLook> {
+  const roadLook = obj.roadLook;
+  if (!roadLook) {
+    return new Map();
+  }
+
+  return new Map<string, RoadLook>(
+    Object.entries(roadLook).map(([key, o]) => {
+      const {
+        name,
+        lanesLeft = [],
+        lanesRight = [],
+        laneOffsetsLeft = [],
+        laneOffsetsRight = [],
+        shoulderSpaceLeft,
+        shoulderSpaceRight,
+      } = o;
+      let offset = o.roadOffset;
+      let laneOffset = undefined;
+      if (offset === 0 && lanesLeft.length > 1 && lanesRight.length > 1) {
+        // calculate an offset for two carriageways that may or may not have a
+        // physical divider between them. this doesn't match the strict
+        // definition of a Dual Carriageway (https://wiki.openstreetmap.org/wiki/Dual_carriageway),
+        // but it leads to better-looking roads on the map because connections
+        // with prefabs containing offset roads look better.
+        // TODO consider keeping things strict, and:
+        // - only setting a non-zero offset if the road has dirt or vegetation in
+        //   its center/median area (in which case, there _is_ a physical barrier), _and_
+        // - use nav curve data in prefabs as the source of truth for whether or not
+        //   a prefab's roads are truly offset.
+        // Or just continue to render two carriageways for non-physically divided carriageways,
+        // and just set a really small offset (but slightly wider road, because of lane counts) to compensate.
+        //offset = Math.max(
+        //  0,
+        //  ...laneOffsetsLeft.flat(),
+        //  ...laneOffsetsRight.flat(),
+        //);
+        // TODO set a flag for further examination in gen phase.
+        // looks like offset space can be reserved, and filled up with either
+        // Terrain items or Building items that follow the same start/ends as roads?
+        laneOffset = Math.max(
+          0,
+          ...laneOffsetsLeft.map(tuple => tuple[0]),
+          ...laneOffsetsRight.map(tuple => tuple[0]),
+        );
+        offset = undefined;
+      }
+      return [
+        // keys look like "road.foo"; we just want the "foo".
+        key.split('.')[1],
+        {
+          // TODO add other fields from RoadLookSii; might let us better center road linestrings.
+          name,
+          lanesLeft,
+          lanesRight,
+          offset,
+          laneOffset,
+          shoulderSpaceLeft,
+          shoulderSpaceRight,
+        },
+      ];
+    }),
+  );
+}
+
+function processAchievementsJson(
+  obj: AchievementsSii,
+): Map<string, Achievement> {
+  const achievements = new Map<string, Achievement>();
+
+  //
+  // achievementVisitCityData
+  //
+  if (obj.achievementVisitCityData) {
+    for (const a of Object.values(obj.achievementVisitCityData)) {
+      achievements.set(a.achievementName, {
+        type: 'visitCityData',
+        cities: a.cities ?? [],
+        countryName: a.countryName,
+      });
+    }
+  }
+
+  //
+  // achievementDeliveryLogData
+  //
+  if (obj.achievementDeliveryLogData) {
+    for (const a of Object.values(obj.achievementDeliveryLogData)) {
+      const {
+        cargos = [],
+        sourceCities = [],
+        sourceCompanies = [],
+        targetCities = [],
+      } = a;
+      const locations = [
+        ...sourceCities.map(city => ({ type: 'city', city }) as const),
+        ...targetCities.map(city => ({ type: 'city', city }) as const),
+        ...sourceCompanies.map(companyAndCity => {
+          const [company, city] = companyAndCity.split('.');
+          return { type: 'company', company, city } as const;
+        }),
+      ];
+      achievements.set(a.achievementName, {
+        type: 'deliveryLogData',
+        locations,
+        cargos,
+      });
+    }
+  }
+
+  //
+  // achievementDeliveryCompany
+  //
+  if (obj.achievementDeliveryCompany && obj.achievementDelivery) {
+    const deliveryCompanyKeys = Object.keys(obj.achievementDeliveryCompany);
+    for (const a of Object.values(obj.achievementDelivery)) {
+      // e.g., ".nv_quarries", for the condition ".nv_quarries.condition"
+      const condition = a.condition.split('.')[1];
+      const keys = deliveryCompanyKeys.filter(c =>
+        c.startsWith(`.${condition}`),
+      );
+      if (!keys.length) {
+        // if there's no company info, then the achievement is probably something
+        // cargo-related, like tx_cotton, or is city-based (e.g., ib_a_coruna).
+        logger.warn(
+          'ignoring delivery achievement (no matching companies)',
+          a.achievementName,
+          a.condition,
+        );
+        continue;
+      }
+
+      const companies: {
+        company: string;
+        locationType: 'city' | 'country';
+        locationToken: string;
+      }[] = [];
+      for (const k of keys) {
+        const dc = obj.achievementDeliveryCompany[k];
+        if (!dc || (dc.cityName == null && dc.countryName == null)) {
+          // "any matching company" condition, like ks_salt.
+          // currently unsupported.
+          continue;
+        }
+        assert(!!dc.cityName !== !!dc.countryName);
+        const company = {
+          company: dc.companyName,
+          locationType: dc.cityName ? 'city' : 'country',
+          locationToken: assertExists(dc.cityName ?? dc.countryName),
+        } as const;
+        // HACK "deep" comparison
+        if (
+          !companies.find(c => JSON.stringify(c) === JSON.stringify(company))
+        ) {
+          companies.push(company);
+        }
+      }
+      if (companies.length === 0) {
+        continue;
+      }
+
+      achievements.set(a.achievementName, {
+        type: 'delivery',
+        delivery: {
+          type: 'company',
+          companies,
+        },
+      });
+    }
+  }
+
+  //
+  // achievementEachCompanyData
+  //
+  if (obj.achievementEachCompanyData) {
+    for (const a of Object.values(obj.achievementEachCompanyData)) {
+      const { sources, targets } = a;
+      assert(!!sources !== !!targets);
+      const companies = (sources ?? targets)!.map(s => {
+        const [company, city] = s.split('.');
+        return { company, city };
+      });
+      achievements.set(a.achievementName, {
+        type: 'eachCompanyData',
+        role: targets ? 'target' : 'source',
+        companies,
+      });
+    }
+  }
+
+  //
+  // achievementTriggerData
+  //
+  if (obj.achievementTriggerData) {
+    for (const a of Object.values(obj.achievementTriggerData)) {
+      achievements.set(a.achievementName, {
+        type: 'triggerData',
+        param: a.triggerParam,
+        count: a.target,
+      });
+    }
+  }
+
+  //
+  // achievementDeliverCargoData
+  //
+  if (obj.achievementDeliverCargoData) {
+    for (const a of Object.values(obj.achievementDeliverCargoData)) {
+      const { targets } = a;
+      const companies = targets.map(s => {
+        const [company, city] = s.split('.');
+        return { company, city };
+      });
+      achievements.set(a.achievementName, {
+        type: 'deliverCargoData',
+        role: 'target',
+        companies,
+      });
+    }
+  }
+
+  //
+  // achievementEachDeliveryPoint
+  //
+  if (obj.achievementEachDeliveryPoint) {
+    for (const a of Object.values(obj.achievementEachDeliveryPoint)) {
+      achievements.set(a.achievementName, {
+        type: 'eachDeliveryPoint',
+        sources: a.sources,
+        targets: a.targets,
+      });
+    }
+  }
+
+  if (obj.achievementDelivery?.['.achievement.st_all_route']) {
+    const a = obj.achievementDelivery['.achievement.st_all_route'];
+    achievements.set(a.achievementName, {
+      type: 'delivery',
+      delivery: {
+        type: 'specialTransport',
+      },
+    });
+  }
+
+  //
+  // achievementFerryData
+  //
+  if (obj.achievementFerryData) {
+    for (const a of Object.values(obj.achievementFerryData)) {
+      achievements.set(a.achievementName, {
+        type: 'ferryData',
+        ...(a.ferryType == null
+          ? {
+              ferryType: 'all',
+              endpointA: assertExists(a.endpointA),
+              endpointB: assertExists(a.endpointB),
+            }
+          : {
+              ferryType: a.ferryType,
+            }),
+      });
+    }
+  }
+
+  //
+  // achievementDeliveryPointCity
+  //
+  if (obj.achievementDeliveryPointCity && obj.achievementDelivery) {
+    const deliveryCityKeys = Object.keys(obj.achievementDeliveryPointCity);
+    for (const a of Object.values(obj.achievementDelivery)) {
+      // e.g., ".ib_a_coruna", for the condition ".ib_a_coruna.condition"
+      const condition = a.condition.split('.')[1];
+      const keys = deliveryCityKeys.filter(c => c.startsWith(`.${condition}`));
+      if (!keys.length) {
+        // if there's no city info, then the achievement is probably something
+        // cargo-related, like bw_ore_caravan.
+        logger.warn(
+          'ignoring delivery achievement (no matching cities)',
+          a.achievementName,
+        );
+        continue;
+      }
+
+      const cities: { cityToken: string }[] = [];
+      for (const k of keys) {
+        const dc = assertExists(obj.achievementDeliveryPointCity[k]);
+        cities.push({ cityToken: dc.cityName });
+      }
+
+      if (achievements.has(a.achievementName)) {
+        // if the achievement already exists, then the achievement is probably
+        // something like gr_olive, where the source companies/cities are arguably
+        // more important than the destination cities.
+        logger.warn(
+          'ignoring delivery achievement (already exists)',
+          a.achievementName,
+        );
+      } else {
+        achievements.set(a.achievementName, {
+          type: 'delivery',
+          delivery: {
+            type: 'city',
+            cities,
+          },
+        });
+      }
+    }
+  }
+
+  //
+  // achievementLimitData
+  //
+  if (obj.achievementLimitData) {
+    for (const a of Object.values(obj.achievementLimitData)) {
+      achievements.set(a.achievementName, {
+        type: 'limitData',
+        achievementName: a.achievementName,
+      });
+    }
+  }
+
+  return achievements;
+}
+
+function processRouteJson(
+  obj: RouteSii,
+  oversizeOfferData: OversizeOfferSii,
+): Map<string, Route> {
+  const routes = new Map<string, Route>();
+  const allOffers = Object.values(oversizeOfferData.oversizeOfferData);
+  for (const [key, route] of Object.entries(obj.routeData)) {
+    const routeKey = assertExists(key.split('.')[1]);
+    routes.set(routeKey, {
+      ...route,
+      cargoTokens: allOffers
+        .filter(offer => offer.route === key)
+        .map(offer => offer.cargo.split('.')[1]),
+    });
+  }
+  return routes;
+}
+
+function processMileageTargetJson(
+  obj: MileageTargetsSii,
+): Map<string, MileageTarget> {
+  const mileageTargets = new Map<string, MileageTarget>();
+  for (const [key, rawTarget] of Object.entries(obj.mileageTarget)) {
+    const token = assertExists(key.split('.')[1]);
+    let target: MileageTarget = {
+      token: token,
+      editorName: rawTarget.editorName,
+      defaultName: rawTarget.defaultName,
+      nameVariants: Array.isArray(rawTarget.names) ? rawTarget.names : [],
+      distanceOffset: rawTarget.distanceOffset,
+    };
+    // Some mileage targets are specified with a position, which we can use
+    // directly. For other mileage targets, a node uid is given, which we'll
+    // have to try to resolve later using data from map sector files.
+    if (rawTarget.position.every(v => v != null)) {
+      // SCS coordinates: easting, up, southing
+      const [x, , y] = rawTarget.position.map(v => Math.round(v * 100) / 100);
+      target = { ...target, x, y };
+    } else if (rawTarget.nodeUid != null) {
+      target = { ...target, nodeUid: rawTarget.nodeUid };
+    } else {
+      // A total lack of position information is rare, but it can happen for
+      // test data or unreleased DLC. Either way, nothing we can do about it.
+      logger.debug('skipping mileage target (no position, nor uid)', token);
+      continue;
+    }
+    if (rawTarget.searchRadius >= 0) {
+      target = { ...target, searchRadius: rawTarget.searchRadius };
+    }
+    mileageTargets.set(token, target);
+  }
+  return mileageTargets;
+}

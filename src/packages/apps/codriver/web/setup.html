@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATS Co-Driver: getting ready</title>
+<link rel="icon" href="/icon.svg">
+<style>
+  :root { --bg: #06080b; --card: #0f141b; --line: #ffffff1a; --fg: #eef3f8; --dim: #8593a5; --acc: #3fa9ff; --ok: #34c759; --warn: #ffb020; --bad: #ff4d4f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: radial-gradient(1200px 600px at 70% -10%, #12324d 0%, var(--bg) 60%); color: var(--fg);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; display: grid; place-items: center; padding: 24px; }
+  main { width: min(640px, 100%); }
+  h1 { margin: 0 0 4px; font-size: 32px; letter-spacing: -.5px; } h1 span { color: var(--acc); }
+  .lead { color: var(--dim); margin: 0 0 24px; }
+  .step { display: grid; grid-template-columns: 34px 1fr; gap: 12px; padding: 14px 16px; margin-bottom: 10px; border-radius: 16px;
+    background: var(--card); border: 1px solid var(--line); align-items: start; }
+  .ico { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; background: #1c2633; color: var(--dim); }
+  .step.run .ico { background: transparent; border: 3px solid #1c2633; border-top-color: var(--acc); animation: spin .9s linear infinite; }
+  .step.ok .ico { background: var(--ok); color: #fff; } .step.warn .ico { background: var(--warn); color: #111; } .step.fail .ico { background: var(--bad); color: #fff; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .lbl { font-weight: 600; } .det { color: var(--dim); font-size: 14px; overflow-wrap: anywhere; }
+  .bar { height: 6px; border-radius: 3px; background: #1c2633; margin-top: 8px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--acc), #6fd3ff); transition: width .6s; }
+  .pick { margin-top: 10px; display: flex; gap: 8px; } .pick input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: #0a0e13; color: var(--fg); font: inherit; }
+  button { font: inherit; padding: 10px 16px; border-radius: 10px; border: 0; background: var(--acc); color: #fff; font-weight: 700; cursor: pointer; }
+  .err { color: var(--bad); margin-top: 14px; } .hint { color: var(--dim); font-size: 13px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ATS <span>Co-Driver</span></h1>
+  <p class="lead">Getting everything ready. The first start builds the map from your own game, that takes a few minutes, only once.</p>
+  <div id="steps"></div>
+  <div class="err" id="err"></div>
+  <p class="hint">You can leave this page open, it continues to the “connect your phone” page by itself.</p>
+</main>
+<script>
+  const icons = { wait: '', run: '', ok: '✓', skip: '–', warn: '!', fail: '✕' };
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  let picking = false;
+  function render(st) {
+    document.getElementById('steps').innerHTML = st.steps.map(s => `
+      <div class="step ${s.state}"><div class="ico">${icons[s.state]}</div><div>
+        <div class="lbl">${esc(s.label)}</div><div class="det">${esc(s.detail || '')}</div>
+        ${s.state === 'run' && s.progress != null ? `<div class="bar"><i style="width:${Math.round(s.progress * 100)}%"></i></div>` : ''}
+        ${s.id === 'game' && st.needGameDir ? `<div class="pick"><input id="gdir" placeholder="e.g. D:\\SteamLibrary\\steamapps\\common\\American Truck Simulator"><button id="gbtn">Use this folder</button></div>` : ''}
+      </div></div>`).join('');
+    document.getElementById('err').textContent = st.error ? 'Something went wrong: ' + st.error : '';
+    const b = document.getElementById('gbtn');
+    if (b) b.onclick = async () => {
+      const r = await fetch('/setup/game-dir', { method: 'POST', body: JSON.stringify({ dir: document.getElementById('gdir').value }) });
+      if (!r.ok) alert("That doesn't look like the American Truck Simulator folder (it should contain base_map.scs).");
+    };
+  }
+  async function tick() {
+    try {
+      const st = await (await fetch('/setup/status', { cache: 'no-store' })).json();
+      if (!(st.needGameDir && document.activeElement?.id === 'gdir')) render(st);
+    } catch {
+      // setup finished: the Co-Driver server takes over this address while it loads the map
+      try { const r = await fetch('/api/connect', { cache: 'no-store' }); if (r.ok) { location.href = '/connect'; return; } } catch {}
+    }
+    setTimeout(tick, 800);
+  }
+  tick();
+</script>
+</body>
+</html>

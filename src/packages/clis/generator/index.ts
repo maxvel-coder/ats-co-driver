@@ -1,0 +1,44 @@
+#!/usr/bin/env -S npx tsx
+
+import * as process from 'process';
+import yargs from 'yargs';
+import { hideBin } from 'yargs/helpers';
+import * as achievements from './commands/achievements';
+import * as contours from './commands/contours';
+import * as dataSubset from './commands/data-subset';
+import * as ets2Villages from './commands/ets2-villages';
+import * as extraLabels from './commands/extra-labels';
+import * as footprints from './commands/footprints';
+import * as graph from './commands/graph';
+import * as map from './commands/map';
+import * as prefabCurves from './commands/prefab-curves';
+import * as roundabouts from './commands/roundabouts';
+import * as search from './commands/search';
+import * as spritesheet from './commands/spritesheet';
+
+async function main() {
+  await yargs(hideBin(process.argv))
+    .wrap(yargs().terminalWidth()) // Use full width of wide terminals.
+    .command(map)
+    .command(dataSubset)
+    .command(prefabCurves)
+    .command(ets2Villages)
+    .command(extraLabels)
+    .command(footprints)
+    .command(contours)
+    .command(achievements)
+    .command(spritesheet)
+    .command(graph)
+    .command(roundabouts)
+    .command(search)
+    .demandCommand()
+    .check(argv => {
+      if (argv._.length !== 1) {
+        throw new Error('Only one command can be given at a time.');
+      }
+      return true;
+    })
+    .parse();
+}
+
+await main();

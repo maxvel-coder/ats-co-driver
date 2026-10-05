@@ -1,0 +1,118 @@
+#!/usr/bin/env -S NODE_OPTIONS=--max-old-space-size=8192 npx tsx
+
+import { UnreachableError } from '@truckermudgeon/base/precon';
+import { writeArrayFile } from '@truckermudgeon/io';
+import type { DefData, MapData } from '@truckermudgeon/map/types';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import * as process from 'process';
+import yargs from 'yargs';
+import { hideBin } from 'yargs/helpers';
+import { parseMapFiles } from './game-files/map-files-parser';
+import { logger } from './logger';
+
+const homeDirectory = os.homedir();
+const untildify = (path: string) =>
+  homeDirectory ? path.replace(/^~(?=$|\/|\\)/, homeDirectory) : path;
+
+function main() {
+  const args = yargs(hideBin(process.argv))
+    .wrap(yargs().terminalWidth()) // Use full width of wide terminals.
+    .usage('Parses ATS/ETS2 game data and outputs map JSON and PNG files.\n')
+    .usage('Usage: $0 -i <dir> -o <dir>')
+    .option('inputDir', {
+      alias: 'i',
+      describe: 'Path to ATS/ETS2 game dir (the one with all the .scs files)',
+      type: 'string',
+      coerce: untildify,
+      demandOption: true,
+    })
+    .option('outputDir', {
+      alias: 'o',
+      describe: 'Path to dir JSON and PNG files should be written to',
+      type: 'string',
+      coerce: untildify,
+      demandOption: true,
+    })
+    .option('includeDlc', {
+      describe: 'Include DLC files',
+      type: 'boolean',
+      default: true,
+    })
+    .option('mode', {
+      alias: 'm',
+      describe: 'The type of data to parse',
+      choices: ['defs', 'icons', 'all'] as const,
+      default: 'all' as 'defs' | 'icons' | 'all',
+    })
+    .option('dryRun', {
+      describe: "Don't write out any files",
+      type: 'boolean',
+      default: false,
+    })
+    .parseSync();
+
+  const scsFilePaths = fs
+    .readdirSync(args.inputDir, { withFileTypes: true })
+    .filter(e => e.isFile() && e.name.endsWith('.scs'))
+    .map(e => path.join(args.inputDir, e.name));
+
+  const { map, ...result } = parseMapFiles(scsFilePaths, args);
+  if (args.dryRun) {
+    logger.success('dry run complete.');
+    return;
+  }
+
+  if (!fs.existsSync(args.outputDir)) {
+    fs.mkdirSync(args.outputDir, { recursive: true });
+  }
+
+  const pngOutputDir = path.join(args.outputDir, 'icons');
+  switch (result.data) {
+    case 'icons':
+      writeIcons(pngOutputDir, result.icons);
+      break;
+    case 'defs':
+      writeJson(args.outputDir, map, result.defData);
+      break;
+    case 'all':
+      writeJson(args.outputDir, map, result.mapData);
+      writeIcons(pngOutputDir, result.icons);
+      break;
+    default:
+      throw new UnreachableError(result);
+  }
+
+  fs.writeFileSync(
+    path.join(args.outputDir, `${map}-version.txt`),
+    result.version,
+  );
+
+  logger.success('done.');
+}
+
+function writeIcons(pngOutputDir: string, icons: Map<string, Buffer>) {
+  logger.log('writing', icons.size, `.png files to ${pngOutputDir}...`);
+  if (!fs.existsSync(pngOutputDir)) {
+    fs.mkdirSync(pngOutputDir);
+  }
+  for (const [name, buffer] of icons) {
+    fs.writeFileSync(path.join(pngOutputDir, name + '.png'), buffer);
+  }
+}
+
+function writeJson(
+  outputDir: string,
+  map: 'usa' | 'europe',
+  data: MapData | DefData,
+) {
+  for (const key of Object.keys(data)) {
+    const collection = data[key as keyof (MapData | DefData)];
+    const filename = `${map}-${key}.json`;
+    logger.log('writing', collection.length, `entries to ${filename}...`);
+    writeArrayFile(collection, path.join(outputDir, filename));
+  }
+}
+
+main();

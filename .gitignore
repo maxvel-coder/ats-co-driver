@@ -1,0 +1,10 @@
+# build output (the installer is attached to GitHub Releases instead)
+dist/
+build/out/
+# test data: a map built from the game's files is SCS's data, never published
+test-home/
+# local restore points and logs
+snapshots/
+*.out
+*.log
+node_modules/

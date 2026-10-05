@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en" translate="no" class="notranslate">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#07090c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="maplibre/maplibre-gl.css">
+<link rel="stylesheet" href="app.css">
+<title>ATS Co-Driver</title>
+</head>
+<body data-theme="night">
+<!--
+  Head-unit layout. Four drop zones hold the widgets the driver picked (Customize mode):
+    quick   – small round shortcuts on the map edge
+    cluster – instrument cluster (speed, revs/gear, fuel …)
+    side    – cards (trip, delivery, timing …) and buttons
+    dock    – row of switches along the bottom
+-->
+<div id="app">
+  <section id="mapWrap">
+    <div id="map"></div>
+
+    <div id="navBanner" hidden>
+      <div class="arrow" id="navArrow">↑</div>
+      <div class="navText">
+        <div class="navDist" id="navDist">–</div>
+        <div class="navWhat" id="navWhat">–</div>
+      </div>
+      <div id="navThen" hidden>then <span id="navThenArrow">↑</span></div>
+      <div id="laneStrip" hidden></div>
+      <div id="navProgress"><i id="navProgressBar"></i></div>
+    </div>
+
+    <div id="searchBox" hidden>
+      <input id="searchInput" type="search" placeholder="Search city, company, favourite…" autocomplete="off">
+      <div id="searchResults" hidden></div>
+    </div>
+
+    <div class="zone" id="zone-quick" data-zone="quick"></div>
+
+    <div id="mapButtons">
+      <button id="btnFold" class="round fold" title="Hide / show buttons"></button>
+      <button id="btnRecenter" class="round" title="Follow my car"></button>
+      <button id="btnOrient" class="round" title="Heading up / North up">N</button>
+      <button id="btnSearch" class="round" title="Search"></button>
+      <button id="btnTheme" class="round" title="Day / night mode"></button>
+      <button id="btnEdit" class="round" title="Customize"></button>
+      <button id="btnSettings" class="round" title="Settings"></button>
+    </div>
+
+    <!-- Stopped at a company / station / rest area: one tap = the game's Enter -->
+    <div id="actionPrompt" hidden>
+      <div class="apIcon" id="apIcon"></div>
+      <div class="apText"><b id="apTitle">–</b><span id="apSub">–</span><span id="apInfo" hidden></span></div>
+      <button id="apGo" class="apGo">⏎ Enter</button>
+      <button id="apClose" class="apClose" title="Hide">✕</button>
+    </div>
+
+    <div id="connBadge">Connecting…</div>
+    <!-- hide / show the instruments + cards panel: map and buttons only -->
+    <button id="btnPanel" title="Hide / show the panel"></button>
+  </section>
+
+  <section id="console">
+    <div class="zone" id="zone-cluster" data-zone="cluster"></div>
+    <div class="zone" id="zone-side" data-zone="side"></div>
+  </section>
+
+  <div class="zone" id="zone-dock" data-zone="dock"></div>
+</div>
+
+<!-- Customize mode -->
+<div id="editBar" hidden>
+  <span><b>Customize</b> <span class="muted">drag to move · ✕ to remove · + to add</span></span>
+  <button id="editAdd" class="primary">＋ Add</button>
+  <button id="editReset" class="ghost">Reset</button>
+  <button id="editDone" class="primary">Done</button>
+</div>
+<div id="drawer" class="sheet" hidden>
+  <div class="sheetHead"><div class="sheetTitle">Add a widget</div><button class="ghost close" data-close="drawer">✕</button></div>
+  <div class="muted small">Pick one, then tap where it should go. Or drag it onto the screen.</div>
+  <div id="drawerList"></div>
+</div>
+
+<!-- Map long-press menu -->
+<div id="pointMenu" class="sheet" hidden>
+  <div class="sheetTitle" id="pointTitle">Selected point</div>
+  <button id="pmNavigate" class="primary">Navigate here</button>
+  <button id="pmReplace" hidden>Replace route, go only here</button>
+  <button id="pmFavourite">☆ Add to favourites</button>
+  <button id="pmCancel" class="ghost">Cancel</button>
+</div>
+
+<!-- Hold a route pin -->
+<div id="stopMenu" class="sheet" hidden>
+  <div class="sheetTitle" id="stopTitle">Stop</div>
+  <button id="smRemove" class="danger">Remove stop</button>
+  <button id="smCancel" class="ghost">Cancel</button>
+</div>
+
+<!-- Fuel/rest suggestion -->
+<div id="suggestion" class="sheet" hidden>
+  <div class="sheetTitle" id="sugReason">–</div>
+  <div class="sugStop" id="sugStop">–</div>
+  <div class="muted" id="sugInfo">–</div>
+  <div class="muted" id="sugDetail" hidden>–</div>
+  <div class="row">
+    <button id="sugGo" class="primary">Go there</button>
+    <button id="sugLater" class="ghost">Not now</button>
+  </div>
+</div>
+
+<!-- Delivery details -->
+<div id="jobSheet" class="sheet tall" hidden>
+  <div class="sheetHead"><div class="sheetTitle">Delivery</div><button class="ghost close" data-close="jobSheet">✕</button></div>
+  <div id="jobEmpty" class="muted">No delivery active. Take a Quick Job or a Dispatch job in the game and it will appear here, the route is set automatically.</div>
+  <div id="jobCard" hidden>
+    <div class="jobCargo" id="jobCargo">–</div>
+    <div class="jobRow"><span class="k">From</span><span id="jobFrom">–</span></div>
+    <div class="jobRow"><span class="k">To</span><span id="jobTo">–</span></div>
+    <div class="jobRow"><span class="k">Pay</span><span id="jobIncome">–</span></div>
+    <div class="jobRow"><span class="k">Planned</span><span id="jobPlanned">–</span></div>
+    <div class="jobRow"><span class="k">Arrive not before</span><span><span id="jobEarliest">not set</span> <button id="btnSetEarliest" class="mini">Set</button></span></div>
+    <div class="jobRow"><span class="k">Deliver by</span><span id="jobDue">–</span></div>
+    <div class="jobRow"><span class="k">Time left</span><span id="jobLeft">–</span></div>
+    <div class="jobRow"><span class="k">Arrival (game time)</span><span id="jobEta">–</span></div>
+    <div class="jobRow"><span class="k" id="jobSpareLabel">Spare time</span><span id="jobSpare">–</span></div>
+  </div>
+</div>
+
+<!-- Favourites -->
+<div id="favSheet" class="sheet tall" hidden>
+  <div class="sheetHead"><div class="sheetTitle">Favourites</div><button class="ghost close" data-close="favSheet">✕</button></div>
+  <div id="favList" class="muted">No favourites yet. Long-press anywhere on the map → "Add to favourites".</div>
+</div>
+
+<!-- Rear camera -->
+<div id="camSheet" class="sheet tall" hidden>
+  <div class="sheetHead"><div class="sheetTitle">Rear camera</div><button class="ghost close" data-close="camSheet">✕</button></div>
+  <div id="camView"><div class="muted" id="camMsg">The live rear-camera image needs the capture module, which is still being built. The button below switches the parking cameras on in the game.</div></div>
+  <button data-press="parking_cams" class="primary">Toggle parking cameras in game</button>
+</div>
+
+<!-- Settings -->
+<div id="settingsSheet" class="sheet full" hidden>
+  <div class="sheetHead"><div class="sheetTitle">Settings</div><span class="saved" id="setSaved">✓ Saved</span><button class="ghost close" data-close="settingsSheet">✕</button></div>
+  <form id="settingsForm" onsubmit="return false"></form>
+</div>
+
+<div id="toast" hidden></div>
+
+<script src="maplibre/maplibre-gl.js"></script>
+<script>if (/[?&]demo\b/.test(location.search)) document.write('<script src="demo.js"><\/script>');</script>
+<script src="widgets.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

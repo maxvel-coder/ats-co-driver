@@ -1,0 +1,7 @@
+/.idea
+/out
+**/build
+**/public
+**/coverage
+libdeflate
+extra-labels

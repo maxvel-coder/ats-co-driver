@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<title>Scene preview (development)</title>
+<link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css">
+<link rel="stylesheet" href="scenes.css">
+<style>html, body { margin: 0; background: #000; } .screen { position: relative; width: 100vw; height: 62.5vw; overflow: hidden; }</style>
+</head>
+<body>
+<!-- one scene, full width: dev.html?s=junction (not linked from the site) -->
+<div class="screen" id="scene-x"></div>
+<script>document.querySelector('.screen').id = 'scene-' + (new URLSearchParams(location.search).get('s') || 'hero');</script>
+<script src="vendor/maplibre/maplibre-gl.js"></script>
+<script src="scenes.js"></script>
+</body>
+</html>
