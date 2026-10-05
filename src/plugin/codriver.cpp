@@ -521,7 +521,9 @@ EXPORT SCSAPI_RESULT scs_input_init(const scs_u32_t version, const scs_input_ini
     static scs_input_device_input_t inputs[MIX_COUNT];
     for (int i = 0; i < MIX_COUNT; ++i) { inputs[i].name = g_mixes[i]; inputs[i].display_name = g_mixes[i]; inputs[i].value_type = SCS_VALUE_TYPE_bool; }
     scs_input_device_t d; memset(&d, 0, sizeof d);
-    d.name = "ats_codriver"; d.display_name = "ATS Co-Driver"; d.type = SCS_INPUT_DEVICE_TYPE_semantical;
+    // display name without "-": the game rejects it ("invalid device display_name", buttons disabled)
+    d.display_name = "ATS Co Driver"; d.type = SCS_INPUT_DEVICE_TYPE_semantical;
+    d.name = "ats_codriver";
     d.input_count = MIX_COUNT; d.inputs = inputs; d.input_event_callback = on_input;
     scs_result_t r = p->register_device(&d);
     log_line("input device register: %d", r);
