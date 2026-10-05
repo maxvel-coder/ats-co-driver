@@ -742,17 +742,35 @@ document.addEventListener('pointerdown', e => {
   const id = card.dataset.add;
   const to = e.target.closest('[data-to]');
   if (to) { e.preventDefault(); addWidgetTo(id, to.dataset.to); return; }
-  e.preventDefault();
+  // Swipe = scroll the list, tap = pick the card, press and hold (~0.35 s) = drag it onto the screen.
+  // (No preventDefault here, so the list keeps scrolling normally.)
   const x0 = e.clientX, y0 = e.clientY;
-  const mv = ev => { if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 10) { cleanup(); drawerPick = null; beginDrag(ev, id, null); } };
-  const up = () => {
+  let last = e;
+  const hold = setTimeout(() => {
     cleanup();
+    card.classList.add('lifted');
+    setTimeout(() => card.classList.remove('lifted'), 300);
+    navigator.vibrate?.(30);
+    drawerPick = null;
+    holdDrag = true;
+    beginDrag(last, id, null);
+  }, 350);
+  const mv = ev => { last = ev; if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 8) cleanup(); };   // moved: it's a scroll
+  const up = ev => {
+    const moved = Math.hypot(ev.clientX - x0, ev.clientY - y0) > 8;
+    cleanup();
+    if (moved) return;
     // a tap selects the card: its places light up on the screen, its "+ Dock / + Side panel…" buttons show
     drawerPick = drawerPick === id ? null : id;
     for (const c of $('drawerList').querySelectorAll('.wcard')) c.classList.toggle('pick', c.dataset.add === drawerPick);
     markZones(drawerPick ? widgetDef(drawerPick) : null);
   };
-  const cleanup = () => { removeEventListener('pointermove', mv); removeEventListener('pointerup', up); };
+  const cleanup = () => { clearTimeout(hold); removeEventListener('pointermove', mv); removeEventListener('pointerup', up); removeEventListener('pointercancel', cleanup); };
   addEventListener('pointermove', mv);
   addEventListener('pointerup', up);
+  addEventListener('pointercancel', cleanup);
 }, true);
+// once a held card is being dragged, the finger moves the widget, not the list
+let holdDrag = false;
+document.addEventListener('touchmove', e => { if (drag && holdDrag) e.preventDefault(); }, { passive: false });
+document.addEventListener('pointerup', () => { holdDrag = false; }, true);

@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findSteamAppSync } from 'steam-locate';
 
-const VERSION = '1.0.2';
+const VERSION = '1.0.3';
 const PORT = Number(process.env.CODRIVER_PORT) || 8080;
 const ATS_APP_ID = '270880';
 // installed layout:  <install>\node\node.exe  +  <install>\app\{launcher,server}.mjs, tools\, native\, web\, maplibre\, plugin\, piper\

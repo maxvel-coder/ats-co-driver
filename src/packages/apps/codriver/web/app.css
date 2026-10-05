@@ -519,7 +519,8 @@ body.editing #btnPanel { display: none; }
 #drawerList h4 { margin: 14px 0 6px; font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .08em; }
 .wcards { display: grid; gap: 8px; }
 .wcard { display: grid; grid-template-columns: 132px 1fr; gap: 12px; align-items: center; padding: 8px; border-radius: 16px;
-  background: var(--tile); border: 1px solid var(--line2); cursor: grab; touch-action: none; user-select: none; transition: border-color .15s, background .15s; }
+  background: var(--tile); border: 1px solid var(--line2); cursor: grab; touch-action: pan-y; user-select: none; transition: border-color .15s, background .15s, transform .15s; }
+.wcard.lifted { transform: scale(1.03); border-color: var(--acc); }
 .wcard.pick { border-color: var(--acc); background: color-mix(in srgb, var(--acc) 12%, var(--tile)); }
 .wcard.used { opacity: .55; }
 .wprev { position: relative; height: 76px; border-radius: 12px; background: var(--console); overflow: hidden; pointer-events: none; }
