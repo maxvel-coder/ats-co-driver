@@ -8,7 +8,7 @@ import path from 'path';
 import type { Argv, BuilderArguments } from 'yargs';
 import { checkGraph } from '../graph/check-graph';
 import { toDemoGraph } from '../graph/demo-graph';
-import { generateGraph, graphMapDataKeys } from '../graph/graph';
+import { generateGraph, graphMapDataKeys, graphWarnings } from '../graph/graph';
 import { logger } from '../logger';
 import { maybeEnsureOutputDir, untildify } from './path-helpers';
 
@@ -79,6 +79,8 @@ export async function handler(args: BuilderArguments<typeof builder>) {
   });
 
   const { graphDebug, ...res } = generateGraph(tsMapData);
+  const { inconsistentRoadLinks } = graphWarnings();
+  if (inconsistentRoadLinks) logger.warn(`skipped ${inconsistentRoadLinks} road links whose nodes and roads disagree (missing DLC / map mods)`);
   if (args.check) {
     await checkGraph(res.graph, tsMapData);
   }

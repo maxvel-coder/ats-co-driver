@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findSteamAppSync } from 'steam-locate';
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const PORT = Number(process.env.CODRIVER_PORT) || 8080;
 const ATS_APP_ID = '270880';
 // installed layout:  <install>\node\node.exe  +  <install>\app\{launcher,server}.mjs, tools\, native\, web\, maplibre\, plugin\, piper\
@@ -146,8 +146,37 @@ function runNode(script: string, args: string[], label: string, onLine?: (line: 
     const feed = (d: Buffer) => { out.write(d); for (const l of d.toString('utf8').split(/\r|\n/)) if (l.trim()) onLine?.(l.trim()); };
     p.stdout.on('data', feed);
     p.stderr.on('data', feed);
-    p.on('exit', code => { out.end(); code === 0 ? resolve() : reject(new Error(`${label} failed (exit ${code}), see ${path.join(LOG_DIR, `map-${label}.log`)}`)); });
+    p.on('exit', code => { out.end(); code === 0 ? resolve() : reject(Object.assign(new Error(`${label} failed (exit ${code})`), { label, code, logFile: path.join(LOG_DIR, `map-${label}.log`) })); });
   });
+}
+
+// A failed step in plain words, plus the details for a bug report (end of the tool's log, PC facts).
+const PHASE_NAME: Record<string, string> = { parse: 'Reading the game files', graph: 'Building the road network', map: 'Drawing the map', icons: 'Cutting map icons' };
+function explainFailure(e: unknown, gameDir: string) {
+  const err = e as Error & { label?: string; code?: number; logFile?: string };
+  let tail = '';
+  try { tail = fs.readFileSync(err.logFile ?? '', 'utf8').split(/\r?\n/).filter(l => l.trim()).slice(-30).join('\n'); } catch { /* no log */ }
+  const ram = Math.round(os.totalmem() / 2 ** 30), free = Math.round(os.freemem() / 2 ** 30);
+  let reason: string;
+  if (/heap out of memory|Allocation failed|ENOMEM/i.test(tail) || err.code === 134) reason = `Not enough memory (this PC has ${ram} GB, ${free} GB free). Close the game, browsers and other big programs, then press Try again.`;
+  else if (/ENOSPC|no space left/i.test(tail)) reason = 'The disk is full. Free a few GB on the system drive, then press Try again.';
+  else if (/EPERM|EACCES|EBUSY/i.test(tail)) reason = 'A file was locked or not allowed. Close the game, then press Try again.';
+  else {
+    const line = tail.split('\n').reverse().find(l => /error|exception|cannot|failed|undefined/i.test(l)) ?? tail.split('\n').at(-1) ?? '';
+    reason = `${PHASE_NAME[err.label ?? ''] ?? 'A step'} failed: ${line.trim().slice(0, 220) || err.message}`;
+  }
+  let dlcs: string[] = [];
+  try { dlcs = fs.readdirSync(gameDir).filter(f => /^dlc_.*\.scs$/.test(f)); } catch { /* no folder */ }
+  const report = [
+    `**What happened:** ${PHASE_NAME[err.label ?? ''] ?? err.message} failed on the first start (${err.message}).`,
+    '', `- Co-Driver ${VERSION}, Windows ${os.release()}, ${ram} GB RAM (${free} GB free)`,
+    `- Map DLC files: ${dlcs.length} (${dlcs.map(f => f.replace(/^dlc_|\.scs$/g, '')).join(', ').slice(0, 400)})`,
+    '', 'End of the log:', '```', tail.slice(-3500), '```',
+  ].join('\n');
+  return {
+    reason,
+    reportUrl: `https://github.com/maxvel-coder/ats-co-driver/issues/new?title=${encodeURIComponent(`First start: ${PHASE_NAME[err.label ?? ''] ?? 'setup'} failed`)}&body=${encodeURIComponent(report)}`,
+  };
 }
 
 async function buildMap(gameDir: string) {
@@ -244,6 +273,11 @@ function startSetupPage(): Promise<void> {
       res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ ok }));
     }
+    if (u.pathname === '/setup/retry' && req.method === 'POST') { retryRequested?.(); res.writeHead(200); return res.end('{}'); }
+    if (u.pathname === '/setup/open-logs' && req.method === 'POST') {
+      spawn('explorer.exe', [LOG_DIR], { detached: true, stdio: 'ignore' }).unref();
+      res.writeHead(200); return res.end('{}');
+    }
     if (u.pathname === '/icon.svg') { res.writeHead(200, { 'Content-Type': 'image/svg+xml' }); return res.end(fs.readFileSync(path.join(PROGRAM_DIR, 'web', 'icon.svg'))); }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
     res.end(page);
@@ -254,6 +288,7 @@ function startSetupPage(): Promise<void> {
   });
 }
 let gameDirPicked: ((d: string) => void) | null = null;
+let retryRequested: (() => void) | null = null;
 
 function startServer(gameDocs: string): ChildProcess {
   set('server', 'run', 'Loading the map (about a minute)…');
@@ -304,8 +339,19 @@ async function main() {
   const gameDocs = path.join(documentsDir(), 'American Truck Simulator');
 
   if (process.env.CODRIVER_NO_PLUGIN) set('plugin', 'skip', 'Skipped (test run)'); else installPlugin(gameDir);
-  try { await buildMap(gameDir); }
-  catch (e) { status.error = e instanceof Error ? e.message : String(e); set('map', 'fail', status.error); return; }
+  // a failed map step waits on the page for "Try again" (it resumes from the failed step)
+  for (;;) {
+    try { await buildMap(gameDir); break; }
+    catch (e) {
+      const f = explainFailure(e, gameDir);
+      log('map build failed:', e instanceof Error ? e.message : e);
+      Object.assign(status, { error: f.reason, reportUrl: f.reportUrl });
+      set('map', 'fail', f.reason);
+      await new Promise<void>(r => { retryRequested = r; });
+      retryRequested = null;
+      Object.assign(status, { error: null, reportUrl: null });
+    }
+  }
   await getVoice();
 
   // hand the port over from the setup page to the real server (the page shows "loading" meanwhile)

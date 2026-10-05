@@ -11,7 +11,7 @@
 ;     the firewall rule, and (if the user agrees) the built map, voice and settings
 
 #define AppName "ATS Co-Driver"
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.1"
 #define Dist "..\dist\ATS Co-Driver"
 
 [Setup]

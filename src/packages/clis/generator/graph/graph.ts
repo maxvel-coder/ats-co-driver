@@ -1139,6 +1139,10 @@ function updateGraphWithFerries(
   }
 }
 
+// ATS Co-Driver: edges skipped because a node and its road disagree (see the Road case below)
+let inconsistentRoadLinks = 0;
+export const graphWarnings = () => ({ inconsistentRoadLinks });
+
 function getNeighborsInDirection(
   originNode: Node,
   direction: 'forward' | 'backward',
@@ -1207,7 +1211,13 @@ function getNeighborsInDirection(
       const destNodeId =
         direction === 'forward' ? item.endNodeUid : item.startNodeUid;
 
-      assert(originNodeId === originNode.uid);
+      // ATS Co-Driver: some game installs (missing DLC states, map mods) have nodes whose
+      // neighbor road doesn't start at them. Skip that one edge (guessing the road's direction
+      // could make wrong-way edges) instead of failing the whole graph build.
+      if (originNodeId !== originNode.uid) {
+        inconsistentRoadLinks++;
+        return [];
+      }
       const roadLook = assertExists(context.roadLooks.get(item.roadLookToken));
       const lanesInDirection =
         direction === 'forward'

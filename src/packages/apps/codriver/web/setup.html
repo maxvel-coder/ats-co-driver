@@ -24,7 +24,12 @@
   .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--acc), #6fd3ff); transition: width .6s; }
   .pick { margin-top: 10px; display: flex; gap: 8px; } .pick input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: #0a0e13; color: var(--fg); font: inherit; }
   button { font: inherit; padding: 10px 16px; border-radius: 10px; border: 0; background: var(--acc); color: #fff; font-weight: 700; cursor: pointer; }
-  .err { color: var(--bad); margin-top: 14px; } .hint { color: var(--dim); font-size: 13px; margin-top: 18px; }
+  .err { margin-top: 14px; padding: 16px; border-radius: 16px; background: #ff4d4f14; border: 1px solid #ff4d4f66; }
+  .err[hidden], .hint[hidden] { display: none; }
+  .err b { color: var(--bad); display: block; margin-bottom: 4px; } .err p { margin: 0 0 12px; }
+  .err .row { display: flex; flex-wrap: wrap; gap: 8px; } .err .ghost { background: #1c2633; } .err a.ghost { text-decoration: none; }
+  .err a { font: inherit; padding: 10px 16px; border-radius: 10px; color: #fff; font-weight: 700; display: inline-block; }
+  .hint { color: var(--dim); font-size: 13px; margin-top: 18px; }
 </style>
 </head>
 <body>
@@ -32,8 +37,11 @@
   <h1>ATS <span>Co-Driver</span></h1>
   <p class="lead">Getting everything ready. The first start builds the map from your own game, that takes a few minutes, only once.</p>
   <div id="steps"></div>
-  <div class="err" id="err"></div>
-  <p class="hint">You can leave this page open, it continues to the “connect your phone” page by itself.</p>
+  <div class="err" id="err" hidden>
+    <b>Something went wrong</b><p id="errText"></p>
+    <div class="row"><button id="retry">↻ Try again</button><button class="ghost" id="logs">Open log folder</button><a class="ghost" id="report" target="_blank" rel="noopener">Report this problem</a></div>
+  </div>
+  <p class="hint" id="hint">You can leave this page open, it continues to the “connect your phone” page by itself.</p>
 </main>
 <script>
   const icons = { wait: '', run: '', ok: '✓', skip: '–', warn: '!', fail: '✕' };
@@ -46,13 +54,18 @@
         ${s.state === 'run' && s.progress != null ? `<div class="bar"><i style="width:${Math.round(s.progress * 100)}%"></i></div>` : ''}
         ${s.id === 'game' && st.needGameDir ? `<div class="pick"><input id="gdir" placeholder="e.g. D:\\SteamLibrary\\steamapps\\common\\American Truck Simulator"><button id="gbtn">Use this folder</button></div>` : ''}
       </div></div>`).join('');
-    document.getElementById('err').textContent = st.error ? 'Something went wrong: ' + st.error : '';
+    document.getElementById('err').hidden = !st.error;
+    document.getElementById('hint').hidden = !!st.error;
+    document.getElementById('errText').textContent = st.error || '';
+    document.getElementById('report').href = st.reportUrl || 'https://github.com/maxvel-coder/ats-co-driver/issues/new';
     const b = document.getElementById('gbtn');
     if (b) b.onclick = async () => {
       const r = await fetch('/setup/game-dir', { method: 'POST', body: JSON.stringify({ dir: document.getElementById('gdir').value }) });
       if (!r.ok) alert("That doesn't look like the American Truck Simulator folder (it should contain base_map.scs).");
     };
   }
+  document.getElementById('retry').onclick = () => fetch('/setup/retry', { method: 'POST' });
+  document.getElementById('logs').onclick = () => fetch('/setup/open-logs', { method: 'POST' });
   async function tick() {
     try {
       const st = await (await fetch('/setup/status', { cache: 'no-store' })).json();
